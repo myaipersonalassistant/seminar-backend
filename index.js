@@ -1,6 +1,10 @@
 const express = require('express');
 require('dotenv').config();
 
+const { JWT } = require('google-auth-library');
+const nodemailer = require('nodemailer');
+const cors = require('cors');
+
 // Verify critical environment variables are loaded
 const requiredEnvVars = ['STRIPE_SECRET_KEY', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_SHEETS_ID', 'GOOGLE_SERVICE_ACCOUNT_EMAIL', 'EMAIL_USER', 'EMAIL_PASSWORD'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
@@ -12,11 +16,17 @@ if (missingEnvVars.length > 0) {
   }
 }
 
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-const { JWT } = require('google-auth-library');
-const nodemailer = require('nodemailer');
-const cors = require('cors');
+// Lazy-load Stripe
+let stripe = null;
+function getStripe() {
+  if (!stripe) {
+    if (!process.env.STRIPE_SECRET_KEY) {
+      throw new Error('STRIPE_SECRET_KEY is not set');
+    }
+    stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+  }
+  return stripe;
+}
 
 const app = express();
 
@@ -41,6 +51,9 @@ async function initializeGoogleSheets() {
   if (googleSheetAuthInitialized) return;
   
   try {
+    // Lazy load google-spreadsheet only when needed
+    const { GoogleSpreadsheet } = require('google-spreadsheet');
+    
     let googleCredentials;
     try {
       googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
@@ -269,7 +282,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
     const orderRef = `ORDER-${timestamp}-${randomId}`;
 
     // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
         {
@@ -345,7 +358,7 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
     const totalAmount = bookPrice + shippingPrice;
 
     // Create Stripe checkout session
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
         {
@@ -426,7 +439,7 @@ app.get('/api/verify-session/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
 
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const session = await getStripe().checkout.sessions.retrieve(sessionId);
 
     res.json({
       sessionId: session.id,
@@ -508,7 +521,7 @@ app.post('/api/webhooks/stripe', async (req, res) => {
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    event = getStripe().webhooks.constructEvent(req.body, sig, endpointSecret);
     console.log('✓ Webhook signature verified, event type:', event.type);
   } catch (err) {
     console.error('❌ Webhook error:', err);
