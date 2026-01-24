@@ -1,11 +1,22 @@
 const express = require('express');
 require('dotenv').config();
+
+// Verify critical environment variables are loaded
+const requiredEnvVars = ['STRIPE_SECRET_KEY', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_SHEETS_ID', 'GOOGLE_SERVICE_ACCOUNT_EMAIL', 'EMAIL_USER', 'EMAIL_PASSWORD'];
+const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
+
+if (missingEnvVars.length > 0) {
+  console.error('❌ Missing environment variables:', missingEnvVars.join(', '));
+  if (process.env.NODE_ENV === 'production') {
+    console.error('Make sure these are set in your Vercel/hosting environment variables');
+  }
+}
+
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
-require('dotenv').config();
 
 const app = express();
 
@@ -19,38 +30,50 @@ app.use(express.json());
 app.use('/api/webhooks/stripe', express.raw({type: 'application/json'}));
 
 // ============================================
-// Google Sheets Setup
+// Google Sheets Setup (Lazy Initialization)
 // ============================================
 
-let googleCredentials;
-try {
-  // Try to parse as JSON object (from .env file)
-  googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-  console.log('✓ Google credentials parsed as JSON');
-} catch (e) {
-  console.log('⚠ Could not parse as JSON, treating as raw key');
-  googleCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+let googleSheetAuthInitialized = false;
+let serviceAccountAuth;
+let doc;
+
+async function initializeGoogleSheets() {
+  if (googleSheetAuthInitialized) return;
+  
+  try {
+    let googleCredentials;
+    try {
+      googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+      console.log('✓ Google credentials parsed as JSON');
+    } catch (e) {
+      console.log('⚠ Could not parse as JSON, treating as raw key');
+      googleCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
+    }
+
+    const privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
+
+    if (!privateKey) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing!');
+    }
+
+    serviceAccountAuth = new JWT({
+      email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      key: privateKey,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID, serviceAccountAuth);
+    googleSheetAuthInitialized = true;
+    console.log('✓ Google Sheets initialized');
+  } catch (error) {
+    console.error('❌ Error initializing Google Sheets:', error.message);
+    throw error;
+  }
 }
-
-const privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
-
-if (!privateKey) {
-  throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing!');
-}
-
-console.log('Private key starts with:', privateKey.substring(0, 50));
-console.log('Private key ends with:', privateKey.substring(privateKey.length - 50));
-
-const serviceAccountAuth = new JWT({
-  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  key: privateKey,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-});
-
-const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID, serviceAccountAuth);
 
 async function addToGoogleSheets(data, sheetIndex = 0) {
   try {
+    await initializeGoogleSheets();
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
     
@@ -79,6 +102,7 @@ async function addToGoogleSheets(data, sheetIndex = 0) {
 
 async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
   try {
+    await initializeGoogleSheets();
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
     const rows = await sheet.getRows();
@@ -98,6 +122,7 @@ async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
 
 async function getFromGoogleSheets(orderRef, sheetIndex = 0) {
   try {
+    await initializeGoogleSheets();
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
     const rows = await sheet.getRows();
@@ -557,7 +582,30 @@ app.post('/api/webhooks/stripe', async (req, res) => {
  * Health Check
  */
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK' });
+  res.json({ 
+    status: 'OK',
+    environment: process.env.NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * Debug: Check Environment Variables (Development Only)
+ */
+app.get('/api/debug/env', (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Not available in production' });
+  }
+  
+  res.json({
+    stripePresentence: !!process.env.STRIPE_SECRET_KEY,
+    googleSheetsPresentence: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+    googleSheetsId: process.env.GOOGLE_SHEETS_ID ? 'Set' : 'Missing',
+    emailUserPresence: !!process.env.EMAIL_USER,
+    emailPasswordPresence: !!process.env.EMAIL_PASSWORD,
+    frontendUrl: process.env.FRONTEND_URL,
+    nodeEnv: process.env.NODE_ENV
+  });
 });
 
 // ============================================
