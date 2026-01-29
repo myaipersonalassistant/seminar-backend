@@ -49,40 +49,76 @@ app.use(express.json());
 let googleSheetAuthInitialized = false;
 let serviceAccountAuth;
 let doc;
+let GoogleSpreadsheet; // Store the class reference
 
 async function initializeGoogleSheets() {
-  if (googleSheetAuthInitialized) return;
+  if (googleSheetAuthInitialized) {
+    console.log('✓ Google Sheets already initialized');
+    return;
+  }
+  
+  console.log('🔄 Initializing Google Sheets...');
   
   try {
+    // Check required environment variables first
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_EMAIL is not set');
+    }
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
+    }
+    if (!process.env.GOOGLE_SHEETS_ID) {
+      throw new Error('GOOGLE_SHEETS_ID is not set');
+    }
+    
     // Lazy load google-spreadsheet only when needed
-    const { GoogleSpreadsheet } = require('google-spreadsheet');
+    if (!GoogleSpreadsheet) {
+      const module = require('google-spreadsheet');
+      GoogleSpreadsheet = module.GoogleSpreadsheet;
+      console.log('✓ Google Spreadsheet module loaded');
+    }
     
     let googleCredentials;
     try {
       googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
       console.log('✓ Google credentials parsed as JSON');
     } catch (e) {
-      console.log('⚠ Could not parse as JSON, treating as raw key');
+      console.log('⚠ Could not parse GOOGLE_SERVICE_ACCOUNT_KEY as JSON, treating as raw key');
       googleCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
     }
 
     const privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
 
     if (!privateKey) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing!');
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing or invalid!');
     }
 
+    console.log('✓ Private key extracted');
+    console.log('✓ Using service account:', process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+
+    // Create JWT auth
     serviceAccountAuth = new JWT({
       email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
       key: privateKey,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 
+    console.log('✓ JWT authentication created');
+
+    // Create the document instance with auth
     doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID, serviceAccountAuth);
+    console.log('✓ Google Spreadsheet instance created with ID:', process.env.GOOGLE_SHEETS_ID);
+    
+    // Load the document info to verify auth works
+    await doc.loadInfo();
+    console.log('✓ Successfully loaded spreadsheet:', doc.title);
+    
     googleSheetAuthInitialized = true;
-    console.log('✓ Google Sheets initialized');
+    console.log('✅ Google Sheets fully initialized and authenticated');
   } catch (error) {
     console.error('❌ Error initializing Google Sheets:', error.message);
+    console.error('Full error:', error);
+    googleSheetAuthInitialized = false; // Reset flag on error
     throw error;
   }
 }
@@ -90,8 +126,16 @@ async function initializeGoogleSheets() {
 async function addToGoogleSheets(data, sheetIndex = 0) {
   try {
     await initializeGoogleSheets();
+    
+    // Reload info to ensure we have the latest sheet data
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
+    
+    if (!sheet) {
+      throw new Error(`Sheet at index ${sheetIndex} not found. Available sheets: ${doc.sheetCount}`);
+    }
+    
+    console.log(`Adding row to sheet: ${sheet.title}`);
     
     await sheet.addRow({
       order_reference: data.order_reference,
@@ -110,8 +154,10 @@ async function addToGoogleSheets(data, sheetIndex = 0) {
       created_at: data.created_at,
       updated_at: data.updated_at,
     });
+    
+    console.log('✓ Row added successfully');
   } catch (error) {
-    console.error('Error adding to Google Sheets:', error);
+    console.error('Error adding to Google Sheets:', error.message);
     throw error;
   }
 }
@@ -119,15 +165,21 @@ async function addToGoogleSheets(data, sheetIndex = 0) {
 async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
   try {
     await initializeGoogleSheets();
+    
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
+    
+    if (!sheet) {
+      throw new Error(`Sheet at index ${sheetIndex} not found`);
+    }
+    
     const rows = await sheet.getRows();
     
-    const row = rows.find(r => r.order_reference === orderRef);
+    const row = rows.find(r => r.get('order_reference') === orderRef);
     if (row) {
       console.log(`Updating row for order ${orderRef}:`, updates);
       for (const [key, value] of Object.entries(updates)) {
-        row[key] = value;
+        row.set(key, value);
       }
       await row.save();
       console.log(`✓ Successfully updated order ${orderRef}`);
@@ -135,7 +187,7 @@ async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
       console.warn(`⚠ Order ${orderRef} not found in Google Sheets for update`);
     }
   } catch (error) {
-    console.error('Error updating Google Sheets:', error);
+    console.error('Error updating Google Sheets:', error.message);
     throw error;
   }
 }
@@ -143,14 +195,20 @@ async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
 async function getFromGoogleSheets(orderRef, sheetIndex = 0) {
   try {
     await initializeGoogleSheets();
+    
     await doc.loadInfo();
     const sheet = doc.sheetsByIndex[sheetIndex];
+    
+    if (!sheet) {
+      throw new Error(`Sheet at index ${sheetIndex} not found`);
+    }
+    
     const rows = await sheet.getRows();
     
-    const row = rows.find(r => r.order_reference === orderRef);
+    const row = rows.find(r => r.get('order_reference') === orderRef);
     return row ? row.toObject() : null;
   } catch (error) {
-    console.error('Error reading from Google Sheets:', error);
+    console.error('Error reading from Google Sheets:', error.message);
     throw error;
   }
 }
@@ -228,68 +286,58 @@ async function sendConfirmationEmail(data, type = 'ticket') {
             <p><strong>Order Reference:</strong> ${data.orderRef}</p>
             <p><strong>Number of Tickets:</strong> ${data.quantity}</p>
             <p><strong>Event Date:</strong> Friday, 14 March 2026</p>
-            <p><strong>Time:</strong> 2:00 PM – 4:00 PM (Doors open 1:15 PM)</p>
-            <p><strong>Location:</strong> Whitla Hall, Methodist College Belfast</p>
+            <p><strong>Event Time:</strong> 6:00 PM - 9:00 PM</p>
+            <p><strong>Venue:</strong> Ramada Encore Chatham</p>
           </div>
           
-          <h3>What Happens Next?</h3>
+          <h3>What to Bring</h3>
           <ul>
-            <li>Please bring this email or your order reference to the event for check-in</li>
-            <li>Arrive early to secure your preferred seating</li>
-            <li>Check the website for any updates before the event</li>
+            <li>This confirmation email (digital or printed)</li>
+            <li>A valid ID</li>
+            <li>Your order reference: <strong>${data.orderRef}</strong></li>
           </ul>
-          
-          <h3>Can't Make It?</h3>
-          <p>Tickets are non-refundable but transferable. If you can't attend, you can transfer your tickets to someone else.</p>
           
           <hr style="margin: 30px 0; border: none; border-top: 1px solid #e2e8f0;">
           
-          <p>If you have any questions, please reply to this email or visit our website.</p>
+          <p>We look forward to seeing you at the seminar!</p>
           
           <p>Best regards,<br>
-          The Seminar Team</p>
+          The Team</p>
         </div>
       `;
     }
-    
-    const mailOptions = {
+
+    await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: data.email,
-      subject: subject,
-      html: html,
-    };
-    
-    await transporter.sendMail(mailOptions);
-    console.log(`Confirmation email sent to ${data.email}`);
+      subject,
+      html,
+    });
+
+    console.log(`✓ Email sent successfully to ${data.email}`);
   } catch (error) {
     console.error('Error sending email:', error);
+    throw error;
   }
 }
 
 // ============================================
-// API Endpoints
+// Routes
 // ============================================
 
 /**
- * Create Stripe Checkout Session
+ * Create Ticket Checkout Session
  */
-app.post('/api/create-checkout-session', async (req, res) => {
+app.post('/api/create-ticket-checkout-session', async (req, res) => {
   try {
-    const { name, email, phone, quantity, ticketPrice, successUrl, cancelUrl } = req.body;
+    const { quantity, customerName, customerEmail, customerPhone } = req.body;
 
-    // Validate input
-    if (!name || !email || !quantity || !ticketPrice) {
-      return res.status(400).json({
-        error: 'Missing required fields: name, email, quantity, ticketPrice',
-      });
+    if (!quantity || quantity < 1) {
+      return res.status(400).json({ error: 'Invalid quantity' });
     }
 
-    // Generate order reference
-    const timestamp = Date.now();
-    const randomId = Math.random().toString(36).substr(2, 9).toUpperCase();
-    const orderRef = `ORDER-${timestamp}-${randomId}`;
+    const orderRef = `TIX-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    // Create Stripe checkout session
     const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -297,37 +345,42 @@ app.post('/api/create-checkout-session', async (req, res) => {
           price_data: {
             currency: 'gbp',
             product_data: {
-              name: 'Seminar Tickets',
-              description: `${quantity} ticket(s) for Friday, 14 March 2026`,
+              name: 'Seminar Ticket',
+              description: 'Friday, 14 March 2026 at Ramada Encore Chatham',
             },
-            unit_amount: Math.round(ticketPrice * 100), // Amount in pence
+            unit_amount: 1500, // £15.00 in pence
           },
-          quantity: quantity,
+          quantity,
         },
       ],
       mode: 'payment',
-      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}&order_ref=${orderRef}&payment=success`,
-      cancel_url: `${cancelUrl}?payment=cancelled`,
-      customer_email: email,
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancel`,
+      customer_email: customerEmail,
       metadata: {
         orderRef,
-        name,
-        phone: phone || '',
-        quantity,
+        name: customerName,
+        quantity: quantity.toString(),
+        phone: customerPhone || '',
+        productType: 'ticket',
       },
     });
 
-    // Add initial record to Google Sheets with "pending" status
+    // Save to Google Sheets with pending status
     await addToGoogleSheets({
       order_reference: orderRef,
-      customer_name: name,
-      customer_email: email,
-      customer_phone: phone || '',
-      quantity: quantity,
-      amount_total: Math.round(ticketPrice * quantity * 100), // Store in cents
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone || '',
+      quantity,
+      amount_total: session.amount_total,
       stripe_session_id: session.id,
+      stripe_payment_intent_id: '',
       status: 'pending',
       product_type: 'ticket',
+      shipping_address: '',
+      shipping_city: '',
+      shipping_postcode: '',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
@@ -337,7 +390,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       sessionId: session.id,
     });
   } catch (error) {
-    console.error('Error creating checkout session:', error);
+    console.error('Error creating ticket checkout session:', error);
     res.status(500).json({
       error: error.message || 'Failed to create checkout session',
     });
@@ -345,28 +398,22 @@ app.post('/api/create-checkout-session', async (req, res) => {
 });
 
 /**
- * Create Stripe Checkout Session for Book Purchase
+ * Create Book Checkout Session
  */
 app.post('/api/create-book-checkout-session', async (req, res) => {
   try {
-    const { name, email, phone, address, city, postcode, quantity, bookPrice, shippingPrice, successUrl, cancelUrl } = req.body;
+    const { quantity, customerName, customerEmail, customerPhone, address, city, postcode } = req.body;
 
-    // Validate input
-    if (!name || !email || !address || !city || !postcode || !quantity || !bookPrice || !shippingPrice) {
-      return res.status(400).json({
-        error: 'Missing required fields: name, email, address, city, postcode, quantity, bookPrice, shippingPrice',
-      });
+    if (!quantity || quantity < 1) {
+      return res.status(400).json({ error: 'Invalid quantity' });
     }
 
-    // Generate order reference
-    const timestamp = Date.now();
-    const randomId = Math.random().toString(36).substr(2, 9).toUpperCase();
-    const orderRef = `BOOK-${timestamp}-${randomId}`;
+    if (!address || !city || !postcode) {
+      return res.status(400).json({ error: 'Shipping address is required for book orders' });
+    }
 
-    const bookSubtotal = bookPrice * quantity;
-    const totalAmount = bookSubtotal + shippingPrice;
+    const orderRef = `BOOK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
-    // Create Stripe checkout session
     const session = await getStripe().checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -375,52 +422,39 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
             currency: 'gbp',
             product_data: {
               name: 'Build Wealth Through Property — 7 Reasons Why',
-              description: 'Physical book with UK shipping',
+              description: '100% of proceeds go to Place of Victory Charity',
             },
-            unit_amount: Math.round(bookPrice * 100), // Amount in pence
+            unit_amount: 1000, // £10.00 in pence
           },
-          quantity: quantity,
-        },
-        {
-          price_data: {
-            currency: 'gbp',
-            product_data: {
-              name: 'UK Shipping',
-              description: 'Shipping within UK',
-            },
-            unit_amount: Math.round(shippingPrice * 100), // Amount in pence
-          },
-          quantity: 1,
+          quantity,
         },
       ],
       mode: 'payment',
-      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}&order_ref=${orderRef}&payment=success`,
-      cancel_url: `${cancelUrl}?payment=cancelled`,
-      customer_email: email,
-      shipping_address_collection: {
-        allowed_countries: ['GB'],
-      },
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancel`,
+      customer_email: customerEmail,
       metadata: {
         orderRef,
-        name,
-        phone: phone || '',
+        name: customerName,
+        quantity: quantity.toString(),
+        phone: customerPhone || '',
         address,
         city,
         postcode,
-        quantity,
         productType: 'book',
       },
     });
 
-    // Add initial record to Google Sheets with "pending" status
+    // Save to Google Sheets with pending status
     await addToGoogleSheets({
       order_reference: orderRef,
-      customer_name: name,
-      customer_email: email,
-      customer_phone: phone || '',
-      quantity: quantity,
-      amount_total: Math.round(totalAmount * 100), // Store in cents for consistency
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone || '',
+      quantity,
+      amount_total: session.amount_total,
       stripe_session_id: session.id,
+      stripe_payment_intent_id: '',
       status: 'pending',
       product_type: 'book',
       shipping_address: address,
@@ -636,11 +670,41 @@ app.get('/api/debug/env', (req, res) => {
     stripePresentence: !!process.env.STRIPE_SECRET_KEY,
     googleSheetsPresentence: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
     googleSheetsId: process.env.GOOGLE_SHEETS_ID ? 'Set' : 'Missing',
+    googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ? 'Set' : 'Missing',
     emailUserPresence: !!process.env.EMAIL_USER,
     emailPasswordPresence: !!process.env.EMAIL_PASSWORD,
     frontendUrl: process.env.FRONTEND_URL,
     nodeEnv: process.env.NODE_ENV
   });
+});
+
+/**
+ * Test Google Sheets Connection
+ */
+app.get('/api/debug/test-sheets', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Not available in production' });
+  }
+  
+  try {
+    console.log('Testing Google Sheets connection...');
+    await initializeGoogleSheets();
+    
+    await doc.loadInfo();
+    
+    res.json({
+      success: true,
+      spreadsheetTitle: doc.title,
+      sheetCount: doc.sheetCount,
+      sheets: doc.sheetsByIndex.map(s => ({ title: s.title, rowCount: s.rowCount }))
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      stack: error.stack
+    });
+  }
 });
 
 // ============================================
