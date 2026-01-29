@@ -32,12 +32,15 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  // In development allow any origin (reflect request origin). In production set FRONTEND_URL.
+  origin: process.env.FRONTEND_URL || true,
 }));
-app.use(express.json());
 
-// Raw body for webhook signature verification
-app.use('/api/webhooks/stripe', express.raw({type: 'application/json'}));
+// Raw body for webhook signature verification MUST be registered before express.json()
+// so Stripe's signature verification receives the raw payload unchanged.
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+app.use(express.json());
 
 // ============================================
 // Google Sheets Setup (Lazy Initialization)
@@ -122,10 +125,14 @@ async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
     
     const row = rows.find(r => r.order_reference === orderRef);
     if (row) {
+      console.log(`Updating row for order ${orderRef}:`, updates);
       for (const [key, value] of Object.entries(updates)) {
         row[key] = value;
       }
       await row.save();
+      console.log(`✓ Successfully updated order ${orderRef}`);
+    } else {
+      console.warn(`⚠ Order ${orderRef} not found in Google Sheets for update`);
     }
   } catch (error) {
     console.error('Error updating Google Sheets:', error);
@@ -179,6 +186,7 @@ async function sendConfirmationEmail(data, type = 'ticket') {
             <h3 style="margin-top: 0;">Your Order Details</h3>
             <p><strong>Order Reference:</strong> ${data.orderRef}</p>
             <p><strong>Product:</strong> Build Wealth Through Property — 7 Reasons Why</p>
+            <p><strong>Quantity:</strong> ${data.quantity || 1} ${(data.quantity || 1) > 1 ? 'books' : 'book'}</p>
             <p><strong>Shipping Address:</strong> ${data.address}</p>
             <p><strong>City:</strong> ${data.city}</p>
             <p><strong>Postcode:</strong> ${data.postcode}</p>
@@ -192,7 +200,7 @@ async function sendConfirmationEmail(data, type = 'ticket') {
           
           <h3>What Happens Next?</h3>
           <ul>
-            <li>Your book will be shipped to the address provided</li>
+            <li>Your book${(data.quantity || 1) > 1 ? 's' : ''} will be shipped to the address provided</li>
             <li>You will receive a shipping confirmation email once your order is dispatched</li>
             <li>Expected delivery: 5-7 business days</li>
           </ul>
@@ -316,7 +324,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
       customer_email: email,
       customer_phone: phone || '',
       quantity: quantity,
-      amount_total: ticketPrice * quantity,
+      amount_total: Math.round(ticketPrice * quantity * 100), // Store in cents
       stripe_session_id: session.id,
       status: 'pending',
       product_type: 'ticket',
@@ -341,12 +349,12 @@ app.post('/api/create-checkout-session', async (req, res) => {
  */
 app.post('/api/create-book-checkout-session', async (req, res) => {
   try {
-    const { name, email, phone, address, city, postcode, bookPrice, shippingPrice, successUrl, cancelUrl } = req.body;
+    const { name, email, phone, address, city, postcode, quantity, bookPrice, shippingPrice, successUrl, cancelUrl } = req.body;
 
     // Validate input
-    if (!name || !email || !address || !city || !postcode || !bookPrice || !shippingPrice) {
+    if (!name || !email || !address || !city || !postcode || !quantity || !bookPrice || !shippingPrice) {
       return res.status(400).json({
-        error: 'Missing required fields: name, email, address, city, postcode, bookPrice, shippingPrice',
+        error: 'Missing required fields: name, email, address, city, postcode, quantity, bookPrice, shippingPrice',
       });
     }
 
@@ -355,7 +363,8 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
     const randomId = Math.random().toString(36).substr(2, 9).toUpperCase();
     const orderRef = `BOOK-${timestamp}-${randomId}`;
 
-    const totalAmount = bookPrice + shippingPrice;
+    const bookSubtotal = bookPrice * quantity;
+    const totalAmount = bookSubtotal + shippingPrice;
 
     // Create Stripe checkout session
     const session = await getStripe().checkout.sessions.create({
@@ -370,7 +379,7 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
             },
             unit_amount: Math.round(bookPrice * 100), // Amount in pence
           },
-          quantity: 1,
+          quantity: quantity,
         },
         {
           price_data: {
@@ -398,6 +407,7 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
         address,
         city,
         postcode,
+        quantity,
         productType: 'book',
       },
     });
@@ -408,8 +418,8 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
       customer_name: name,
       customer_email: email,
       customer_phone: phone || '',
-      quantity: 1,
-      amount_total: totalAmount,
+      quantity: quantity,
+      amount_total: Math.round(totalAmount * 100), // Store in cents for consistency
       stripe_session_id: session.id,
       status: 'pending',
       product_type: 'book',
@@ -536,11 +546,22 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         const productType = session.metadata.productType || 'ticket';
         
         console.log(`✓ Payment completed for ${productType} order ${session.metadata.orderRef}`);
+        console.log(`Session payment intent: ${session.payment_intent}, Payment status: ${session.payment_status}`);
+        
+        // Retrieve the payment intent to get more details
+        let paymentIntentId = session.payment_intent;
+        try {
+          const paymentIntent = await getStripe().paymentIntents.retrieve(session.payment_intent);
+          paymentIntentId = paymentIntent.id;
+          console.log(`Payment intent status: ${paymentIntent.status}`);
+        } catch (piErr) {
+          console.warn('Could not retrieve payment intent details:', piErr.message);
+        }
         
         // Update Google Sheets with completed status
         await updateGoogleSheets(session.metadata.orderRef, {
           status: 'completed',
-          stripe_payment_intent_id: session.payment_intent,
+          stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
 
@@ -553,6 +574,7 @@ app.post('/api/webhooks/stripe', async (req, res) => {
             address: session.metadata.address,
             city: session.metadata.city,
             postcode: session.metadata.postcode,
+            quantity: parseInt(session.metadata.quantity),
             amountTotal: session.amount_total,
           }, 'book');
         } else {
