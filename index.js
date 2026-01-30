@@ -1,7 +1,6 @@
 const express = require('express');
 require('dotenv').config();
 
-const { JWT } = require('google-auth-library');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
 
@@ -47,7 +46,6 @@ app.use(express.json());
 // ============================================
 
 let googleSheetAuthInitialized = false;
-let serviceAccountAuth;
 let doc;
 let GoogleSpreadsheet; // Store the class reference
 
@@ -96,18 +94,16 @@ async function initializeGoogleSheets() {
     console.log('✓ Private key extracted');
     console.log('✓ Using service account:', process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
 
-    // Create JWT auth
-    serviceAccountAuth = new JWT({
-      email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      key: privateKey,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    console.log('✓ JWT authentication created');
-
-    // Create the document instance with auth
-    doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID, serviceAccountAuth);
+    // Create the document instance (v3.x style)
+    doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID);
     console.log('✓ Google Spreadsheet instance created with ID:', process.env.GOOGLE_SHEETS_ID);
+    
+    // Authenticate using service account (v3.x style)
+    await doc.useServiceAccountAuth({
+      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      private_key: privateKey,
+    });
+    console.log('✓ Service account authentication completed');
     
     // Load the document info to verify auth works
     await doc.loadInfo();
