@@ -58,68 +58,55 @@ async function initializeGoogleSheets() {
   console.log('🔄 Initializing Google Sheets...');
   
   try {
-    // Check required environment variables first
+    // Check required environment variables
     if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_EMAIL is not set');
     }
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY is not set');
+    if (!process.env.GOOGLE_PRIVATE_KEY) {
+      throw new Error('GOOGLE_PRIVATE_KEY is not set');
     }
     if (!process.env.GOOGLE_SHEETS_ID) {
       throw new Error('GOOGLE_SHEETS_ID is not set');
     }
     
-    // Lazy load google-spreadsheet only when needed
+    // Lazy load google-spreadsheet
     if (!GoogleSpreadsheet) {
       const module = require('google-spreadsheet');
       GoogleSpreadsheet = module.GoogleSpreadsheet;
       console.log('✓ Google Spreadsheet module loaded');
     }
+
+    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
     
-    let googleCredentials;
-    try {
-      googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-      console.log('✓ Google credentials parsed as JSON');
-    } catch (e) {
-      console.log('⚠ Could not parse GOOGLE_SERVICE_ACCOUNT_KEY as JSON, treating as raw key');
-      googleCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-    }
-
-    let privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
-
-    // FIX FOR VERCEL: Ensure \n is properly interpreted as newlines
-    if (privateKey && typeof privateKey === 'string') {
+    // Handle different newline formats
+    if (privateKey.includes('\\n')) {
       privateKey = privateKey.replace(/\\n/g, '\n');
     }
 
-    if (!privateKey) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing or invalid!');
-    }
-
-    console.log('✓ Private key extracted and formatted');
     console.log('✓ Using service account:', process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
+    console.log('✓ Private key loaded');
 
-    // Create the document instance (v3.x style)
+    // Create document instance
     doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID);
-    console.log('✓ Google Spreadsheet instance created with ID:', process.env.GOOGLE_SHEETS_ID);
+    console.log('✓ Google Spreadsheet instance created');
     
-    // Authenticate using service account (v3.x style)
+    // Authenticate
     await doc.useServiceAccountAuth({
       client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
       private_key: privateKey,
     });
     console.log('✓ Service account authentication completed');
     
-    // Load the document info to verify auth works
+    // Load info
     await doc.loadInfo();
     console.log('✓ Successfully loaded spreadsheet:', doc.title);
     
     googleSheetAuthInitialized = true;
-    console.log('✅ Google Sheets fully initialized and authenticated');
+    console.log('✅ Google Sheets fully initialized');
   } catch (error) {
     console.error('❌ Error initializing Google Sheets:', error.message);
     console.error('Full error:', error);
-    googleSheetAuthInitialized = false; // Reset flag on error
+    googleSheetAuthInitialized = false;
     throw error;
   }
 }
