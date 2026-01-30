@@ -85,13 +85,18 @@ async function initializeGoogleSheets() {
       googleCredentials = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
     }
 
-    const privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
+    let privateKey = typeof googleCredentials === 'object' ? googleCredentials.private_key : googleCredentials;
+
+    // FIX FOR VERCEL: Ensure \n is properly interpreted as newlines
+    if (privateKey && typeof privateKey === 'string') {
+      privateKey = privateKey.replace(/\\n/g, '\n');
+    }
 
     if (!privateKey) {
       throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY or private_key is missing or invalid!');
     }
 
-    console.log('✓ Private key extracted');
+    console.log('✓ Private key extracted and formatted');
     console.log('✓ Using service account:', process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
 
     // Create the document instance (v3.x style)
