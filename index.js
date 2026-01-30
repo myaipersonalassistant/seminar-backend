@@ -325,6 +325,105 @@ async function sendConfirmationEmail(data, type = 'ticket') {
 // Routes
 // ============================================
 
+
+/**
+ * Unified Checkout Session (handles both tickets and books)
+ */
+app.post('/api/create-checkout-session', async (req, res) => {
+  try {
+    const { quantity, customerName, customerEmail, customerPhone, productType, address, city, postcode } = req.body;
+
+    if (!quantity || quantity < 1) {
+      return res.status(400).json({ error: 'Invalid quantity' });
+    }
+
+    if (!productType || !['ticket', 'book'].includes(productType)) {
+      return res.status(400).json({ error: 'Invalid product type. Must be "ticket" or "book"' });
+    }
+
+    // Validate shipping info for books
+    if (productType === 'book' && (!address || !city || !postcode)) {
+      return res.status(400).json({ error: 'Shipping address is required for book orders' });
+    }
+
+    const orderRef = productType === 'book' 
+      ? `BOOK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      : `TIX-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Product configuration
+    const productConfig = productType === 'book' 
+      ? {
+          name: 'Build Wealth Through Property — 7 Reasons Why',
+          description: '100% of proceeds go to Place of Victory Charity',
+          unit_amount: 1999, // £19.99
+        }
+      : {
+          name: 'Seminar Ticket',
+          description: 'Friday, 14 March 2026 at Ramada Encore Chatham',
+          unit_amount: 2500, // £25.00
+        };
+
+    const session = await getStripe().checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'gbp',
+            product_data: {
+              name: productConfig.name,
+              description: productConfig.description,
+            },
+            unit_amount: productConfig.unit_amount,
+          },
+          quantity,
+        },
+      ],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&order_ref=${orderRef}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancelled`,
+      customer_email: customerEmail,
+      metadata: {
+        orderRef,
+        name: customerName,
+        quantity: quantity.toString(),
+        phone: customerPhone || '',
+        productType,
+        ...(productType === 'book' && { address, city, postcode }),
+      },
+    });
+
+    // Save to Google Sheets with pending status
+    await addToGoogleSheets({
+      order_reference: orderRef,
+      customer_name: customerName,
+      customer_email: customerEmail,
+      customer_phone: customerPhone || '',
+      quantity,
+      amount_total: session.amount_total,
+      stripe_session_id: session.id,
+      stripe_payment_intent_id: '',
+      status: 'pending',
+      product_type: productType,
+      shipping_address: productType === 'book' ? address : '',
+      shipping_city: productType === 'book' ? city : '',
+      shipping_postcode: productType === 'book' ? postcode : '',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    res.json({
+      url: session.url,
+      sessionId: session.id,
+      orderRef: orderRef,
+    });
+  } catch (error) {
+    console.error('Error creating checkout session:', error);
+    res.status(500).json({
+      error: error.message || 'Failed to create checkout session',
+    });
+  }
+});
+
 /**
  * Create Ticket Checkout Session
  */
@@ -348,14 +447,14 @@ app.post('/api/create-ticket-checkout-session', async (req, res) => {
               name: 'Seminar Ticket',
               description: 'Friday, 14 March 2026 at Ramada Encore Chatham',
             },
-            unit_amount: 1500, // £15.00 in pence
+            unit_amount: 2500, // £25.00 in pence
           },
           quantity,
         },
       ],
       mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancel`,
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&order_ref=${orderRef}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancelled`,
       customer_email: customerEmail,
       metadata: {
         orderRef,
@@ -388,6 +487,7 @@ app.post('/api/create-ticket-checkout-session', async (req, res) => {
     res.json({
       url: session.url,
       sessionId: session.id,
+      orderRef: orderRef,
     });
   } catch (error) {
     console.error('Error creating ticket checkout session:', error);
@@ -424,14 +524,14 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
               name: 'Build Wealth Through Property — 7 Reasons Why',
               description: '100% of proceeds go to Place of Victory Charity',
             },
-            unit_amount: 1000, // £10.00 in pence
+            unit_amount: 1999, // £19.99 in pence
           },
           quantity,
         },
       ],
       mode: 'payment',
-      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancel`,
+      success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}&order_ref=${orderRef}`,
+      cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/cancelled`,
       customer_email: customerEmail,
       metadata: {
         orderRef,
@@ -467,6 +567,7 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
     res.json({
       url: session.url,
       sessionId: session.id,
+      orderRef: orderRef,
     });
   } catch (error) {
     console.error('Error creating book checkout session:', error);
@@ -580,14 +681,18 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         const productType = session.metadata.productType || 'ticket';
         
         console.log(`✓ Payment completed for ${productType} order ${session.metadata.orderRef}`);
+        console.log(`Session ID: ${session.id}`);
         console.log(`Session payment intent: ${session.payment_intent}, Payment status: ${session.payment_status}`);
+        console.log(`Amount total: ${session.amount_total}`);
+        console.log(`Customer email: ${session.customer_email}`);
+        console.log(`Metadata:`, session.metadata);
         
         // Retrieve the payment intent to get more details
         let paymentIntentId = session.payment_intent;
         try {
           const paymentIntent = await getStripe().paymentIntents.retrieve(session.payment_intent);
           paymentIntentId = paymentIntent.id;
-          console.log(`Payment intent status: ${paymentIntent.status}`);
+          console.log(`Payment intent ID: ${paymentIntentId}, status: ${paymentIntent.status}`);
         } catch (piErr) {
           console.warn('Could not retrieve payment intent details:', piErr.message);
         }
@@ -598,6 +703,8 @@ app.post('/api/webhooks/stripe', async (req, res) => {
           stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
+
+        console.log(`✓ Google Sheets updated for order ${session.metadata.orderRef}`);
 
         // Send confirmation email based on product type
         if (productType === 'book') {
@@ -703,6 +810,45 @@ app.get('/api/debug/test-sheets', async (req, res) => {
       success: false,
       error: error.message,
       stack: error.stack
+    });
+  }
+});
+
+/**
+ * Production-Safe Sheets Health Check
+ */
+app.get('/api/sheets-health', async (req, res) => {
+  try {
+    console.log('📊 Testing Google Sheets connection...');
+    
+    const checks = {
+      hasServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      hasServiceAccountKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+      hasSheetsId: !!process.env.GOOGLE_SHEETS_ID,
+    };
+    
+    await initializeGoogleSheets();
+    await doc.loadInfo();
+    
+    res.json({
+      success: true,
+      message: 'Google Sheets connection successful',
+      spreadsheetTitle: doc.title,
+      sheetCount: doc.sheetCount,
+      environmentChecks: checks,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Sheets health check failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      environmentChecks: {
+        hasServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        hasServiceAccountKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
+        hasSheetsId: !!process.env.GOOGLE_SHEETS_ID,
+      },
+      timestamp: new Date().toISOString()
     });
   }
 });
