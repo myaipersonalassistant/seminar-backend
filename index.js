@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 
 // Verify critical environment variables are loaded
-const requiredEnvVars = ['STRIPE_SECRET_KEY', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_SHEETS_ID', 'GOOGLE_SERVICE_ACCOUNT_EMAIL', 'EMAIL_USER', 'EMAIL_PASSWORD'];
+const requiredEnvVars = ['STRIPE_SECRET_KEY', 'FIREBASE_PROJECT_ID', 'EMAIL_USER', 'EMAIL_PASSWORD'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
@@ -42,90 +42,77 @@ app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 // ============================================
-// Google Sheets Setup (Lazy Initialization)
+// Firestore Setup (Lazy Initialization)
 // ============================================
 
-let googleSheetAuthInitialized = false;
-let doc;
-let GoogleSpreadsheet; // Store the class reference
+let firestoreInitialized = false;
+let db;
 
-async function initializeGoogleSheets() {
-  if (googleSheetAuthInitialized) {
-    console.log('✓ Google Sheets already initialized');
+async function initializeFirestore() {
+  if (firestoreInitialized) {
+    console.log('✓ Firestore already initialized');
     return;
   }
   
-  console.log('🔄 Initializing Google Sheets...');
+  console.log('🔄 Initializing Firestore...');
   
   try {
     // Check required environment variables
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
-      throw new Error('GOOGLE_SERVICE_ACCOUNT_EMAIL is not set');
-    }
-    if (!process.env.GOOGLE_PRIVATE_KEY) {
-      throw new Error('GOOGLE_PRIVATE_KEY is not set');
-    }
-    if (!process.env.GOOGLE_SHEETS_ID) {
-      throw new Error('GOOGLE_SHEETS_ID is not set');
+    if (!process.env.FIREBASE_PROJECT_ID) {
+      throw new Error('FIREBASE_PROJECT_ID is not set');
     }
     
-    // Lazy load google-spreadsheet
-    if (!GoogleSpreadsheet) {
-      const module = require('google-spreadsheet');
-      GoogleSpreadsheet = module.GoogleSpreadsheet;
-      console.log('✓ Google Spreadsheet module loaded');
+    // Lazy load firebase-admin
+    const admin = require('firebase-admin');
+    
+    // Initialize Firebase Admin if not already initialized
+    if (admin.apps.length === 0) {
+      // Check if we have service account credentials
+      if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+        // Parse service account from environment variable (JSON string)
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: process.env.FIREBASE_PROJECT_ID,
+        });
+      } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        // Use service account file path
+        const serviceAccount = require(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: process.env.FIREBASE_PROJECT_ID,
+        });
+      } else {
+        // Try to initialize with project ID only (for App Engine, Cloud Functions, etc.)
+        admin.initializeApp({
+          projectId: process.env.FIREBASE_PROJECT_ID,
+        });
+      }
+      console.log('✓ Firebase Admin initialized');
     }
-
-    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
     
-    // Handle different newline formats
-    if (privateKey.includes('\\n')) {
-      privateKey = privateKey.replace(/\\n/g, '\n');
-    }
-
-    console.log('✓ Using service account:', process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL);
-    console.log('✓ Private key loaded');
-
-    // Create document instance
-    doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEETS_ID);
-    console.log('✓ Google Spreadsheet instance created');
+    db = admin.firestore();
+    console.log('✓ Firestore instance created');
     
-    // Authenticate
-    await doc.useServiceAccountAuth({
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: privateKey,
-    });
-    console.log('✓ Service account authentication completed');
-    
-    // Load info
-    await doc.loadInfo();
-    console.log('✓ Successfully loaded spreadsheet:', doc.title);
-    
-    googleSheetAuthInitialized = true;
-    console.log('✅ Google Sheets fully initialized');
+    firestoreInitialized = true;
+    console.log('✅ Firestore fully initialized');
   } catch (error) {
-    console.error('❌ Error initializing Google Sheets:', error.message);
+    console.error('❌ Error initializing Firestore:', error.message);
     console.error('Full error:', error);
-    googleSheetAuthInitialized = false;
+    firestoreInitialized = false;
     throw error;
   }
 }
 
-async function addToGoogleSheets(data, sheetIndex = 0) {
+async function addToFirestore(data) {
   try {
-    await initializeGoogleSheets();
+    await initializeFirestore();
     
-    // Reload info to ensure we have the latest sheet data
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[sheetIndex];
+    const admin = require('firebase-admin');
+    const COLLECTION_NAME = 'ticket_purchases';
+    const orderRef = db.collection(COLLECTION_NAME).doc(data.order_reference);
     
-    if (!sheet) {
-      throw new Error(`Sheet at index ${sheetIndex} not found. Available sheets: ${doc.sheetCount}`);
-    }
-    
-    console.log(`Adding row to sheet: ${sheet.title}`);
-    
-    await sheet.addRow({
+    const orderData = {
       order_reference: data.order_reference,
       customer_name: data.customer_name,
       customer_email: data.customer_email,
@@ -135,68 +122,137 @@ async function addToGoogleSheets(data, sheetIndex = 0) {
       stripe_session_id: data.stripe_session_id || '',
       stripe_payment_intent_id: data.stripe_payment_intent_id || '',
       status: data.status,
-      product_type: data.product_type || 'ticket', // 'ticket' or 'book'
+      product_type: data.product_type || 'ticket',
       shipping_address: data.shipping_address || '',
       shipping_city: data.shipping_city || '',
       shipping_postcode: data.shipping_postcode || '',
-      created_at: data.created_at,
-      updated_at: data.updated_at,
-    });
+      created_at: admin.firestore.Timestamp.fromDate(new Date(data.created_at)),
+      updated_at: admin.firestore.Timestamp.fromDate(new Date(data.updated_at)),
+    };
     
-    console.log('✓ Row added successfully');
+    await orderRef.set(orderData);
+    console.log(`✓ Order ${data.order_reference} added to Firestore`);
+    
+    return orderData;
   } catch (error) {
-    console.error('Error adding to Google Sheets:', error.message);
+    console.error('Error adding to Firestore:', error.message);
     throw error;
   }
 }
 
-async function updateGoogleSheets(orderRef, updates, sheetIndex = 0) {
+async function updateFirestore(orderRef, updates) {
   try {
-    await initializeGoogleSheets();
+    await initializeFirestore();
     
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[sheetIndex];
+    const admin = require('firebase-admin');
+    const COLLECTION_NAME = 'ticket_purchases';
+    const orderDoc = db.collection(COLLECTION_NAME).doc(orderRef);
     
-    if (!sheet) {
-      throw new Error(`Sheet at index ${sheetIndex} not found`);
-    }
+    // Check if document exists
+    const docSnapshot = await orderDoc.get();
     
-    const rows = await sheet.getRows();
-    
-    const row = rows.find(r => r.get('order_reference') === orderRef);
-    if (row) {
-      console.log(`Updating row for order ${orderRef}:`, updates);
-      for (const [key, value] of Object.entries(updates)) {
-        row.set(key, value);
+    if (!docSnapshot.exists) {
+      // Try to find by order_reference field
+      const querySnapshot = await db.collection(COLLECTION_NAME)
+        .where('order_reference', '==', orderRef)
+        .limit(1)
+        .get();
+      
+      if (querySnapshot.empty) {
+        console.warn(`⚠ Order ${orderRef} not found in Firestore for update`);
+        return null;
       }
-      await row.save();
+      
+      // Update the found document
+      const foundDoc = querySnapshot.docs[0];
+      const updateData = {
+        ...updates,
+        updated_at: admin.firestore.Timestamp.now(),
+      };
+      
+      // Convert string dates to Timestamps if needed
+      if (updateData.created_at && typeof updateData.created_at === 'string') {
+        updateData.created_at = admin.firestore.Timestamp.fromDate(new Date(updateData.created_at));
+      }
+      if (updateData.updated_at && typeof updateData.updated_at === 'string') {
+        updateData.updated_at = admin.firestore.Timestamp.fromDate(new Date(updateData.updated_at));
+      }
+      
+      await foundDoc.ref.update(updateData);
       console.log(`✓ Successfully updated order ${orderRef}`);
+      
+      const updatedDoc = await foundDoc.ref.get();
+      return convertFirestoreData(updatedDoc.data());
     } else {
-      console.warn(`⚠ Order ${orderRef} not found in Google Sheets for update`);
+      const updateData = {
+        ...updates,
+        updated_at: admin.firestore.Timestamp.now(),
+      };
+      
+      // Convert string dates to Timestamps if needed
+      if (updateData.created_at && typeof updateData.created_at === 'string') {
+        updateData.created_at = admin.firestore.Timestamp.fromDate(new Date(updateData.created_at));
+      }
+      if (updateData.updated_at && typeof updateData.updated_at === 'string') {
+        updateData.updated_at = admin.firestore.Timestamp.fromDate(new Date(updateData.updated_at));
+      }
+      
+      await orderDoc.update(updateData);
+      console.log(`✓ Successfully updated order ${orderRef}`);
+      
+      const updatedDoc = await orderDoc.get();
+      return convertFirestoreData(updatedDoc.data());
     }
   } catch (error) {
-    console.error('Error updating Google Sheets:', error.message);
+    console.error('Error updating Firestore:', error.message);
     throw error;
   }
 }
 
-async function getFromGoogleSheets(orderRef, sheetIndex = 0) {
+// Helper function to convert Firestore timestamps to ISO strings
+function convertFirestoreData(data) {
+  if (!data) return null;
+  
+  const converted = { ...data };
+  
+  // Convert Firestore Timestamps to ISO strings
+  if (converted.created_at && converted.created_at.toDate) {
+    converted.created_at = converted.created_at.toDate().toISOString();
+  }
+  if (converted.updated_at && converted.updated_at.toDate) {
+    converted.updated_at = converted.updated_at.toDate().toISOString();
+  }
+  
+  return converted;
+}
+
+async function getFromFirestore(orderRef) {
   try {
-    await initializeGoogleSheets();
+    await initializeFirestore();
     
-    await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[sheetIndex];
+    const COLLECTION_NAME = 'ticket_purchases';
+    const orderDoc = db.collection(COLLECTION_NAME).doc(orderRef);
     
-    if (!sheet) {
-      throw new Error(`Sheet at index ${sheetIndex} not found`);
+    // Try to get by document ID first
+    const docSnapshot = await orderDoc.get();
+    
+    if (docSnapshot.exists) {
+      return convertFirestoreData(docSnapshot.data());
     }
     
-    const rows = await sheet.getRows();
+    // If not found, try querying by order_reference field
+    const querySnapshot = await db.collection(COLLECTION_NAME)
+      .where('order_reference', '==', orderRef)
+      .limit(1)
+      .get();
     
-    const row = rows.find(r => r.get('order_reference') === orderRef);
-    return row ? row.toObject() : null;
+    if (querySnapshot.empty) {
+      return null;
+    }
+    
+    return convertFirestoreData(querySnapshot.docs[0].data());
   } catch (error) {
-    console.error('Error reading from Google Sheets:', error.message);
+    console.error('Error reading from Firestore:', error.message);
     throw error;
   }
 }
@@ -380,8 +436,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
       },
     });
 
-    // Save to Google Sheets with pending status
-    await addToGoogleSheets({
+    // Save to Firestore with pending status
+    await addToFirestore({
       order_reference: orderRef,
       customer_name: customerName,
       customer_email: customerEmail,
@@ -453,8 +509,8 @@ app.post('/api/create-ticket-checkout-session', async (req, res) => {
       },
     });
 
-    // Save to Google Sheets with pending status
-    await addToGoogleSheets({
+    // Save to Firestore with pending status
+    await addToFirestore({
       order_reference: orderRef,
       customer_name: customerName,
       customer_email: customerEmail,
@@ -533,8 +589,8 @@ app.post('/api/create-book-checkout-session', async (req, res) => {
       },
     });
 
-    // Save to Google Sheets with pending status
-    await addToGoogleSheets({
+    // Save to Firestore with pending status
+    await addToFirestore({
       order_reference: orderRef,
       customer_name: customerName,
       customer_email: customerEmail,
@@ -594,7 +650,7 @@ app.get('/api/tickets/:orderReference', async (req, res) => {
   try {
     const { orderReference } = req.params;
 
-    const ticket = await getFromGoogleSheets(orderReference);
+    const ticket = await getFromFirestore(orderReference);
 
     if (!ticket) {
       return res.status(404).json({ error: 'Ticket not found' });
@@ -614,7 +670,7 @@ app.post('/api/tickets', async (req, res) => {
   try {
     const data = req.body;
 
-    await addToGoogleSheets(data);
+    await addToFirestore(data);
 
     res.json({ success: true, order_reference: data.order_reference });
   } catch (error) {
@@ -631,9 +687,9 @@ app.patch('/api/tickets/:orderReference', async (req, res) => {
     const { orderReference } = req.params;
     const updates = req.body;
 
-    await updateGoogleSheets(orderReference, updates);
+    await updateFirestore(orderReference, updates);
 
-    const updated = await getFromGoogleSheets(orderReference);
+    const updated = await getFromFirestore(orderReference);
 
     res.json(updated);
   } catch (error) {
@@ -685,14 +741,14 @@ app.post('/api/webhooks/stripe', async (req, res) => {
           console.warn('Could not retrieve payment intent details:', piErr.message);
         }
         
-        // Update Google Sheets with completed status
-        await updateGoogleSheets(session.metadata.orderRef, {
+        // Update Firestore with completed status
+        await updateFirestore(session.metadata.orderRef, {
           status: 'completed',
           stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
 
-        console.log(`✓ Google Sheets updated for order ${session.metadata.orderRef}`);
+        console.log(`✓ Firestore updated for order ${session.metadata.orderRef}`);
 
         // Send confirmation email based on product type
         if (productType === 'book') {
@@ -724,7 +780,7 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         console.log(`⚠ Checkout expired for order ${expiredSession.metadata.orderRef}`);
         
         // Update status to failed
-        await updateGoogleSheets(expiredSession.metadata.orderRef, {
+        await updateFirestore(expiredSession.metadata.orderRef, {
           status: 'failed',
           updated_at: new Date().toISOString(),
         });
@@ -762,10 +818,10 @@ app.get('/api/debug/env', (req, res) => {
   }
   
   res.json({
-    stripePresentence: !!process.env.STRIPE_SECRET_KEY,
-    googleSheetsPresentence: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
-    googleSheetsId: process.env.GOOGLE_SHEETS_ID ? 'Set' : 'Missing',
-    googleServiceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL ? 'Set' : 'Missing',
+    stripePresence: !!process.env.STRIPE_SECRET_KEY,
+    firebaseProjectId: process.env.FIREBASE_PROJECT_ID ? 'Set' : 'Missing',
+    firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT ? 'Set' : 'Missing',
+    googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS ? 'Set' : 'Missing',
     emailUserPresence: !!process.env.EMAIL_USER,
     emailPasswordPresence: !!process.env.EMAIL_PASSWORD,
     frontendUrl: process.env.FRONTEND_URL,
@@ -774,24 +830,26 @@ app.get('/api/debug/env', (req, res) => {
 });
 
 /**
- * Test Google Sheets Connection
+ * Test Firestore Connection
  */
-app.get('/api/debug/test-sheets', async (req, res) => {
+app.get('/api/debug/test-firestore', async (req, res) => {
   if (process.env.NODE_ENV === 'production') {
     return res.status(403).json({ error: 'Not available in production' });
   }
   
   try {
-    console.log('Testing Google Sheets connection...');
-    await initializeGoogleSheets();
+    console.log('Testing Firestore connection...');
+    await initializeFirestore();
     
-    await doc.loadInfo();
+    // Try to read from the collection
+    const testQuery = await db.collection('ticket_purchases').limit(1).get();
     
     res.json({
       success: true,
-      spreadsheetTitle: doc.title,
-      sheetCount: doc.sheetCount,
-      sheets: doc.sheetsByIndex.map(s => ({ title: s.title, rowCount: s.rowCount }))
+      message: 'Firestore connection successful',
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      collectionAccessible: true,
+      sampleCount: testQuery.size
     });
   } catch (error) {
     res.status(500).json({
@@ -803,38 +861,40 @@ app.get('/api/debug/test-sheets', async (req, res) => {
 });
 
 /**
- * Production-Safe Sheets Health Check
+ * Production-Safe Firestore Health Check
  */
-app.get('/api/sheets-health', async (req, res) => {
+app.get('/api/firestore-health', async (req, res) => {
   try {
-    console.log('📊 Testing Google Sheets connection...');
+    console.log('📊 Testing Firestore connection...');
     
     const checks = {
-      hasServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      hasServiceAccountKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
-      hasSheetsId: !!process.env.GOOGLE_SHEETS_ID,
+      hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
+      hasServiceAccount: !!process.env.FIREBASE_SERVICE_ACCOUNT,
+      hasCredentialsFile: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
     };
     
-    await initializeGoogleSheets();
-    await doc.loadInfo();
+    await initializeFirestore();
+    
+    // Try a simple read operation
+    const testQuery = await db.collection('ticket_purchases').limit(1).get();
     
     res.json({
       success: true,
-      message: 'Google Sheets connection successful',
-      spreadsheetTitle: doc.title,
-      sheetCount: doc.sheetCount,
+      message: 'Firestore connection successful',
+      projectId: process.env.FIREBASE_PROJECT_ID,
       environmentChecks: checks,
+      collectionAccessible: true,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('❌ Sheets health check failed:', error);
+    console.error('❌ Firestore health check failed:', error);
     res.status(500).json({
       success: false,
       error: error.message,
       environmentChecks: {
-        hasServiceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        hasServiceAccountKey: !!process.env.GOOGLE_SERVICE_ACCOUNT_KEY,
-        hasSheetsId: !!process.env.GOOGLE_SHEETS_ID,
+        hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
+        hasServiceAccount: !!process.env.FIREBASE_SERVICE_ACCOUNT,
+        hasCredentialsFile: !!process.env.GOOGLE_APPLICATION_CREDENTIALS,
       },
       timestamp: new Date().toISOString()
     });
