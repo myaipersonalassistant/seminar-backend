@@ -329,7 +329,7 @@ async function sendConfirmationEmail(data, type = 'ticket') {
             <h3 style="margin-top: 0;">Your Booking Details</h3>
             <p><strong>Order Reference:</strong> ${data.orderRef}</p>
             <p><strong>Number of Tickets:</strong> ${data.quantity}</p>
-            <p><strong>Event Date:</strong> Friday, 14 March 2026</p>
+            <p><strong>Event Date:</strong> Saturday, 14 March 2026</p>
             <p><strong>Event Time:</strong> 6:00 PM - 9:00 PM</p>
             <p><strong>Venue:</strong> Ramada Encore Chatham</p>
           </div>
@@ -403,7 +403,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
         }
       : {
           name: 'Seminar Ticket',
-          description: 'Friday, 14 March 2026 at Ramada Encore Chatham',
+          description: 'Saturday, 14 March 2026 at Ramada Encore Chatham',
           unit_amount: 2500, // £25.00
         };
 
@@ -489,7 +489,7 @@ app.post('/api/create-ticket-checkout-session', async (req, res) => {
             currency: 'gbp',
             product_data: {
               name: 'Seminar Ticket',
-              description: 'Friday, 14 March 2026 at Ramada Encore Chatham',
+              description: 'Saturday, 14 March 2026 at Ramada Encore Chatham',
             },
             unit_amount: 2500, // £25.00 in pence
           },
@@ -912,5 +912,6 @@ if (process.env.NODE_ENV !== 'production') {
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   });
 }
+
 
 module.exports = app;
