@@ -331,7 +331,7 @@ async function sendConfirmationEmail(data, type = 'ticket') {
             <p><strong>Number of Tickets:</strong> ${data.quantity}</p>
             <p><strong>Event Date:</strong> Saturday, 14 March 2026</p>
             <p><strong>Event Time:</strong> 6:00 PM - 9:00 PM</p>
-            <p><strong>Venue:</strong> Ramada Encore Chatham</p>
+            <p><strong>Venue:</strong> Europa Hotel, Great Victoria Street, Belfast BT2 7AP</p>
           </div>
           
           <h3>What to Bring</h3>
@@ -915,3 +915,4 @@ if (process.env.NODE_ENV !== 'production') {
 
 
 module.exports = app;
+
