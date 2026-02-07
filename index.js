@@ -50,8 +50,11 @@ let db;
 
 async function initializeFirestore() {
   if (firestoreInitialized) {
+    console.log('✓ Firestore already initialized');
     return;
   }
+  
+  console.log('🔄 Initializing Firestore...');
   
   try {
     // Check required environment variables
@@ -85,10 +88,14 @@ async function initializeFirestore() {
           projectId: process.env.FIREBASE_PROJECT_ID,
         });
       }
+      console.log('✓ Firebase Admin initialized');
     }
     
     db = admin.firestore();
+    console.log('✓ Firestore instance created');
+    
     firestoreInitialized = true;
+    console.log('✅ Firestore fully initialized');
   } catch (error) {
     console.error('❌ Error initializing Firestore:', error.message);
     console.error('Full error:', error);
@@ -124,6 +131,7 @@ async function addToFirestore(data) {
     };
     
     await orderRef.set(orderData);
+    console.log(`✓ Order ${data.order_reference} added to Firestore`);
     
     return orderData;
   } catch (error) {
@@ -151,6 +159,7 @@ async function updateFirestore(orderRef, updates) {
         .get();
       
       if (querySnapshot.empty) {
+        console.warn(`⚠ Order ${orderRef} not found in Firestore for update`);
         return null;
       }
       
@@ -176,6 +185,7 @@ async function updateFirestore(orderRef, updates) {
       }
       
       await foundDoc.ref.update(updateData);
+      console.log(`✓ Successfully updated order ${orderRef}`);
       
       const updatedDoc = await foundDoc.ref.get();
       return convertFirestoreData(updatedDoc.data());
@@ -200,6 +210,7 @@ async function updateFirestore(orderRef, updates) {
       }
       
       await orderDoc.update(updateData);
+      console.log(`✓ Successfully updated order ${orderRef}`);
       
       const updatedDoc = await orderDoc.get();
       return convertFirestoreData(updatedDoc.data());
@@ -284,8 +295,35 @@ try {
     const emailUser = process.env.EMAIL_USER.toLowerCase();
     let emailConfig;
     
-    // Check for custom SMTP settings first (highest priority)
-    if (process.env.EMAIL_HOST && process.env.EMAIL_PORT) {
+    if (emailUser.includes('@gmail.com') || emailUser.includes('@googlemail.com')) {
+      // Gmail configuration
+      emailConfig = {
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD, // MUST be an App Password
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
+      };
+      console.log('📧 Using Gmail service');
+      console.log('💡 Make sure EMAIL_PASSWORD is a Gmail App Password (not your regular password)');
+      console.log('💡 Generate one at: https://myaccount.google.com/apppasswords');
+    } else if (emailUser.includes('@outlook.com') || emailUser.includes('@hotmail.com') || emailUser.includes('@live.com')) {
+      // Outlook/Hotmail configuration
+      emailConfig = {
+        service: 'hotmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD, // App Password recommended
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
+      };
+      console.log('📧 Using Outlook/Hotmail service');
+    } else if (process.env.EMAIL_HOST && process.env.EMAIL_PORT) {
       // Custom SMTP configuration
       emailConfig = {
         host: process.env.EMAIL_HOST,
@@ -299,36 +337,11 @@ try {
         greetingTimeout: 10000,
         socketTimeout: 10000,
       };
-    } else if (emailUser.includes('@gmail.com') || emailUser.includes('@googlemail.com')) {
-      // Gmail configuration
+      console.log(`📧 Using custom SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}`);
+    } else {
+      // Default to Gmail-like configuration
       emailConfig = {
         service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD, // MUST be an App Password
-        },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-      };
-    } else if (emailUser.includes('@outlook.com') || emailUser.includes('@hotmail.com') || emailUser.includes('@live.com')) {
-      // Outlook/Hotmail configuration
-      emailConfig = {
-        service: 'hotmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD, // App Password recommended
-        },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-      };
-    } else if (process.env.EMAIL_HOST === 'mail.privateemail.com' || process.env.EMAIL_HOST === 'smtp.privateemail.com') {
-      // PrivateEmail (Namecheap) - use provided SMTP settings
-      emailConfig = {
-        host: process.env.EMAIL_HOST || 'mail.privateemail.com',
-        port: parseInt(process.env.EMAIL_PORT) || 587,
-        secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
         auth: {
           user: process.env.EMAIL_USER,
           pass: process.env.EMAIL_PASSWORD,
@@ -337,16 +350,7 @@ try {
         greetingTimeout: 10000,
         socketTimeout: 10000,
       };
-    } else {
-      // Custom domain email - requires SMTP settings
-      console.error('❌ Custom domain email detected but SMTP settings not provided!');
-      console.error(`   Email: ${process.env.EMAIL_USER}`);
-      console.error('   You must provide EMAIL_HOST and EMAIL_PORT environment variables');
-      console.error('   Example:');
-      console.error('     EMAIL_HOST=smtp.example.com');
-      console.error('     EMAIL_PORT=587');
-      console.error('     EMAIL_SECURE=false');
-      throw new Error('Custom domain email requires EMAIL_HOST and EMAIL_PORT. Please configure SMTP settings.');
+      console.log('📧 Using default email service (Gmail-like)');
     }
     
     transporter = nodemailer.createTransport(emailConfig);
@@ -354,7 +358,18 @@ try {
     // Verify connection on startup (async, don't block)
     transporter.verify(function (error, success) {
       if (error) {
-        console.error('Email transporter verification failed:', error.message);
+        console.error('❌ Email transporter verification failed:', error.message);
+        if (error.code === 'EAUTH' || error.responseCode === 535) {
+          console.error('💡 Authentication failed. Common issues:');
+          console.error('   1. For Gmail: Use an App Password (not your regular password)');
+          console.error('   2. Enable 2-Step Verification first: https://myaccount.google.com/security');
+          console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
+          console.error('   4. Make sure you copy the FULL 16-character password (spaces optional)');
+        } else {
+          console.error('💡 Check your email credentials and network connection');
+        }
+      } else {
+        console.log('✅ Email transporter is ready to send emails');
       }
     });
   }
@@ -370,6 +385,7 @@ async function sendConfirmationEmail(data, type = 'ticket', orderRef = null) {
       throw new Error('Email transporter is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
     }
     
+    console.log(`📧 Sending ${type} confirmation email to: ${data.email}`);
     let subject, html;
     
     if (type === 'book') {
@@ -455,6 +471,8 @@ async function sendConfirmationEmail(data, type = 'ticket', orderRef = null) {
       subject,
       html,
     });
+
+    console.log(`✓ Email sent successfully to ${data.email}`);
     
     // Update email tracking in Firestore if orderRef is provided
     if (orderRef) {
@@ -841,10 +859,13 @@ app.post('/api/webhooks/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+  console.log('🔔 Stripe webhook received');
+
   let event;
 
   try {
     event = getStripe().webhooks.constructEvent(req.body, sig, endpointSecret);
+    console.log('✓ Webhook signature verified, event type:', event.type);
   } catch (err) {
     console.error('❌ Webhook error:', err);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -857,13 +878,21 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         const session = event.data.object;
         const productType = session.metadata.productType || 'ticket';
         
+        console.log(`✓ Payment completed for ${productType} order ${session.metadata.orderRef}`);
+        console.log(`Session ID: ${session.id}`);
+        console.log(`Session payment intent: ${session.payment_intent}, Payment status: ${session.payment_status}`);
+        console.log(`Amount total: ${session.amount_total}`);
+        console.log(`Customer email: ${session.customer_email}`);
+        console.log(`Metadata:`, session.metadata);
+        
         // Retrieve the payment intent to get more details
         let paymentIntentId = session.payment_intent;
         try {
           const paymentIntent = await getStripe().paymentIntents.retrieve(session.payment_intent);
           paymentIntentId = paymentIntent.id;
+          console.log(`Payment intent ID: ${paymentIntentId}, status: ${paymentIntent.status}`);
         } catch (piErr) {
-          // Payment intent retrieval failed, use session payment_intent
+          console.warn('Could not retrieve payment intent details:', piErr.message);
         }
         
         // Update Firestore with completed status
@@ -872,6 +901,8 @@ app.post('/api/webhooks/stripe', async (req, res) => {
           stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
+
+        console.log(`✓ Firestore updated for order ${session.metadata.orderRef}`);
 
         // Send confirmation email based on product type
         try {
@@ -894,14 +925,17 @@ app.post('/api/webhooks/stripe', async (req, res) => {
               quantity: session.metadata.quantity,
             }, 'ticket', session.metadata.orderRef);
           }
+          console.log(`✓ Confirmation email sent successfully to ${session.customer_email}`);
         } catch (emailError) {
-          console.error(`Failed to send email to ${session.customer_email}:`, emailError.message);
+          console.error(`❌ Failed to send email to ${session.customer_email}:`, emailError.message);
           // Don't throw - we still want to mark payment as completed even if email fails
         }
         break;
 
       case 'checkout.session.expired':
         const expiredSession = event.data.object;
+        
+        console.log(`⚠ Checkout expired for order ${expiredSession.metadata.orderRef}`);
         
         // Update status to failed
         await updateFirestore(expiredSession.metadata.orderRef, {
@@ -912,8 +946,7 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         break;
 
       default:
-        // Unhandled event type
-        break;
+        console.log(`ℹ Unhandled event type ${event.type}`);
     }
 
     res.json({received: true});
@@ -1035,6 +1068,7 @@ app.get('/api/debug/test-firestore', async (req, res) => {
   }
   
   try {
+    console.log('Testing Firestore connection...');
     await initializeFirestore();
     
     // Try to read from the collection
@@ -1061,6 +1095,8 @@ app.get('/api/debug/test-firestore', async (req, res) => {
  */
 app.get('/api/firestore-health', async (req, res) => {
   try {
+    console.log('📊 Testing Firestore connection...');
+    
     const checks = {
       hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
       hasServiceAccount: !!process.env.FIREBASE_SERVICE_ACCOUNT,
@@ -1102,7 +1138,8 @@ app.get('/api/firestore-health', async (req, res) => {
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => {
-    // Server started
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   });
 }
 
