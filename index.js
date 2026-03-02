@@ -3,8 +3,10 @@ require('dotenv').config();
 
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const crypto = require('crypto');
 
 // Verify critical environment variables are loaded
+// Optional: ADMIN_SECRET for admin token signing (defaults to STRIPE_SECRET_KEY in dev)
 const requiredEnvVars = ['STRIPE_SECRET_KEY', 'FIREBASE_PROJECT_ID', 'EMAIL_USER', 'EMAIL_PASSWORD'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
@@ -50,11 +52,8 @@ let db;
 
 async function initializeFirestore() {
   if (firestoreInitialized) {
-    console.log('✓ Firestore already initialized');
     return;
   }
-  
-  console.log('🔄 Initializing Firestore...');
   
   try {
     // Check required environment variables
@@ -88,14 +87,10 @@ async function initializeFirestore() {
           projectId: process.env.FIREBASE_PROJECT_ID,
         });
       }
-      console.log('✓ Firebase Admin initialized');
     }
     
     db = admin.firestore();
-    console.log('✓ Firestore instance created');
-    
     firestoreInitialized = true;
-    console.log('✅ Firestore fully initialized');
   } catch (error) {
     console.error('❌ Error initializing Firestore:', error.message);
     console.error('Full error:', error);
@@ -131,7 +126,6 @@ async function addToFirestore(data) {
     };
     
     await orderRef.set(orderData);
-    console.log(`✓ Order ${data.order_reference} added to Firestore`);
     
     return orderData;
   } catch (error) {
@@ -159,7 +153,6 @@ async function updateFirestore(orderRef, updates) {
         .get();
       
       if (querySnapshot.empty) {
-        console.warn(`⚠ Order ${orderRef} not found in Firestore for update`);
         return null;
       }
       
@@ -185,7 +178,6 @@ async function updateFirestore(orderRef, updates) {
       }
       
       await foundDoc.ref.update(updateData);
-      console.log(`✓ Successfully updated order ${orderRef}`);
       
       const updatedDoc = await foundDoc.ref.get();
       return convertFirestoreData(updatedDoc.data());
@@ -210,7 +202,6 @@ async function updateFirestore(orderRef, updates) {
       }
       
       await orderDoc.update(updateData);
-      console.log(`✓ Successfully updated order ${orderRef}`);
       
       const updatedDoc = await orderDoc.get();
       return convertFirestoreData(updatedDoc.data());
@@ -242,6 +233,77 @@ function convertFirestoreData(data) {
   }
   
   return converted;
+}
+
+// ============================================
+// Admin Auth (Option B - server-side)
+// ============================================
+
+const ADMIN_COLLECTION = 'admin';
+const TOKEN_EXPIRY_HOURS = 24;
+
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password).digest('hex').toLowerCase();
+}
+
+function createAdminToken(admin) {
+  const secret = process.env.ADMIN_SECRET || process.env.STRIPE_SECRET_KEY || 'dev-secret-change-in-production';
+  const payload = {
+    adminId: admin.id,
+    username: admin.username,
+    exp: Date.now() + TOKEN_EXPIRY_HOURS * 60 * 60 * 1000,
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifyAdminToken(token) {
+  if (!token) return null;
+  const secret = process.env.ADMIN_SECRET || process.env.STRIPE_SECRET_KEY || 'dev-secret-change-in-production';
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  try {
+    const [payloadB64, sig] = parts;
+    const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+    if (sig !== expectedSig) return null;
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+    if (payload.exp && payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function loginAdmin(username, password) {
+  await initializeFirestore();
+  const snapshot = await db.collection(ADMIN_COLLECTION).where('username', '==', username).limit(1).get();
+  if (snapshot.empty) return null;
+  const doc = snapshot.docs[0];
+  const data = doc.data();
+  const storedHash = (data.password_hash || '').trim();
+  const passwordHash = hashPassword(password);
+  const isStoredHash = storedHash.length === 64 && /^[a-f0-9]{64}$/i.test(storedHash);
+  let valid = false;
+  if (isStoredHash) {
+    valid = storedHash.toLowerCase() === passwordHash;
+  } else {
+    valid = storedHash === password;
+  }
+  if (!valid) return null;
+  await doc.ref.update({ last_login: require('firebase-admin').firestore.Timestamp.now() });
+  return { id: doc.id, username: data.username, email: data.email || '', role: data.role || 'admin' };
+}
+
+function requireAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const payload = verifyAdminToken(token);
+  if (!payload) {
+    return res.status(401).json({ error: 'Unauthorized. Valid admin token required.' });
+  }
+  req.admin = payload;
+  next();
 }
 
 async function getFromFirestore(orderRef) {
@@ -295,35 +357,8 @@ try {
     const emailUser = process.env.EMAIL_USER.toLowerCase();
     let emailConfig;
     
-    if (emailUser.includes('@gmail.com') || emailUser.includes('@googlemail.com')) {
-      // Gmail configuration
-      emailConfig = {
-        service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD, // MUST be an App Password
-        },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-      };
-      console.log('📧 Using Gmail service');
-      console.log('💡 Make sure EMAIL_PASSWORD is a Gmail App Password (not your regular password)');
-      console.log('💡 Generate one at: https://myaccount.google.com/apppasswords');
-    } else if (emailUser.includes('@outlook.com') || emailUser.includes('@hotmail.com') || emailUser.includes('@live.com')) {
-      // Outlook/Hotmail configuration
-      emailConfig = {
-        service: 'hotmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASSWORD, // App Password recommended
-        },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-      };
-      console.log('📧 Using Outlook/Hotmail service');
-    } else if (process.env.EMAIL_HOST && process.env.EMAIL_PORT) {
+    // Check for custom SMTP settings first (highest priority)
+    if (process.env.EMAIL_HOST && process.env.EMAIL_PORT) {
       // Custom SMTP configuration
       emailConfig = {
         host: process.env.EMAIL_HOST,
@@ -337,11 +372,36 @@ try {
         greetingTimeout: 10000,
         socketTimeout: 10000,
       };
-      console.log(`📧 Using custom SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}`);
-    } else {
-      // Default to Gmail-like configuration
+    } else if (emailUser.includes('@gmail.com') || emailUser.includes('@googlemail.com')) {
+      // Gmail configuration
       emailConfig = {
         service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD, // MUST be an App Password
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
+      };
+    } else if (emailUser.includes('@outlook.com') || emailUser.includes('@hotmail.com') || emailUser.includes('@live.com')) {
+      // Outlook/Hotmail configuration
+      emailConfig = {
+        service: 'hotmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASSWORD, // App Password recommended
+        },
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
+      };
+    } else if (process.env.EMAIL_HOST === 'mail.privateemail.com' || process.env.EMAIL_HOST === 'smtp.privateemail.com') {
+      // PrivateEmail (Namecheap) - use provided SMTP settings
+      emailConfig = {
+        host: process.env.EMAIL_HOST || 'mail.privateemail.com',
+        port: parseInt(process.env.EMAIL_PORT) || 587,
+        secure: process.env.EMAIL_SECURE === 'true' || process.env.EMAIL_PORT === '465',
         auth: {
           user: process.env.EMAIL_USER,
           pass: process.env.EMAIL_PASSWORD,
@@ -350,7 +410,16 @@ try {
         greetingTimeout: 10000,
         socketTimeout: 10000,
       };
-      console.log('📧 Using default email service (Gmail-like)');
+    } else {
+      // Custom domain email - requires SMTP settings
+      console.error('❌ Custom domain email detected but SMTP settings not provided!');
+      console.error(`   Email: ${process.env.EMAIL_USER}`);
+      console.error('   You must provide EMAIL_HOST and EMAIL_PORT environment variables');
+      console.error('   Example:');
+      console.error('     EMAIL_HOST=smtp.example.com');
+      console.error('     EMAIL_PORT=587');
+      console.error('     EMAIL_SECURE=false');
+      throw new Error('Custom domain email requires EMAIL_HOST and EMAIL_PORT. Please configure SMTP settings.');
     }
     
     transporter = nodemailer.createTransport(emailConfig);
@@ -358,18 +427,7 @@ try {
     // Verify connection on startup (async, don't block)
     transporter.verify(function (error, success) {
       if (error) {
-        console.error('❌ Email transporter verification failed:', error.message);
-        if (error.code === 'EAUTH' || error.responseCode === 535) {
-          console.error('💡 Authentication failed. Common issues:');
-          console.error('   1. For Gmail: Use an App Password (not your regular password)');
-          console.error('   2. Enable 2-Step Verification first: https://myaccount.google.com/security');
-          console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
-          console.error('   4. Make sure you copy the FULL 16-character password (spaces optional)');
-        } else {
-          console.error('💡 Check your email credentials and network connection');
-        }
-      } else {
-        console.log('✅ Email transporter is ready to send emails');
+        console.error('Email transporter verification failed:', error.message);
       }
     });
   }
@@ -385,11 +443,45 @@ async function sendConfirmationEmail(data, type = 'ticket', orderRef = null) {
       throw new Error('Email transporter is not configured. Please set EMAIL_USER and EMAIL_PASSWORD environment variables.');
     }
     
-    console.log(`📧 Sending ${type} confirmation email to: ${data.email}`);
-    let subject, html;
+    // Get sender name from environment or use default
+    const senderName = process.env.EMAIL_SENDER_NAME || 'Build Wealth Through Property';
+    const senderEmail = process.env.EMAIL_USER;
+    const replyTo = process.env.EMAIL_REPLY_TO || senderEmail;
+    
+    let subject, html, text;
     
     if (type === 'book') {
       subject = `Order Confirmed - Your Book Purchase (${data.orderRef})`;
+      
+      // Plain text version for better deliverability
+      text = `Order Confirmed - Your Book Purchase
+
+Hi ${data.name},
+
+Thank you for purchasing "Build Wealth Through Property — 7 Reasons Why". Your order has been confirmed!
+
+Your Order Details:
+- Order Reference: ${data.orderRef}
+- Product: Build Wealth Through Property — 7 Reasons Why
+- Quantity: ${data.quantity || 1} ${(data.quantity || 1) > 1 ? 'books' : 'book'}
+- Shipping Address: ${data.address}
+- City: ${data.city}
+- Postcode: ${data.postcode}
+- Total Amount: £${(data.amountTotal / 100).toFixed(2)}
+
+100% of proceeds go to Place of Victory Charity
+Thank you for supporting our charity mission!
+
+What Happens Next?
+- Your book${(data.quantity || 1) > 1 ? 's' : ''} will be shipped to the address provided
+- You will receive a shipping confirmation email once your order is dispatched
+- Expected delivery: 5-7 business days
+
+If you have any questions, please reply to this email or visit our website.
+
+Best regards,
+The Team`;
+      
       html = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h1 style="color: #2d3748; margin-bottom: 20px;">Order Confirmed! 📚</h1>
@@ -431,6 +523,31 @@ async function sendConfirmationEmail(data, type = 'ticket', orderRef = null) {
       `;
     } else {
       subject = `Booking Confirmed - Your Seminar Tickets (${data.orderRef})`;
+      
+      // Plain text version
+      text = `Booking Confirmed - Your Seminar Tickets
+
+Hi ${data.name},
+
+Thank you for booking your tickets to our seminar. Your booking has been confirmed!
+
+Your Booking Details:
+- Order Reference: ${data.orderRef}
+- Number of Tickets: ${data.quantity}
+- Event Date: Saturday, 14 March 2026
+- Event Time: 2:00 PM – 5:00 PM (Doors open 1:15 PM)
+- Venue: Europa Hotel, Great Victoria Street, Belfast BT2 7AP
+
+What to Bring:
+- This confirmation email (digital or printed)
+- A valid ID
+- Your order reference: ${data.orderRef}
+
+We look forward to seeing you at the seminar!
+
+Best regards,
+The Team`;
+      
       html = `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h1 style="color: #2d3748; margin-bottom: 20px;">Booking Confirmed! 🎉</h1>
@@ -465,14 +582,33 @@ async function sendConfirmationEmail(data, type = 'ticket', orderRef = null) {
       `;
     }
 
+    // Generate unique Message-ID for better deliverability
+    const domain = senderEmail.split('@')[1];
+    const messageId = `<${orderRef || Date.now()}-${Math.random().toString(36).substr(2, 9)}@${domain}>`;
+    
+    // Get website URL for unsubscribe link
+    const websiteUrl = process.env.FRONTEND_URL || 'https://www.wealthforall.com';
+    
     await transporter.sendMail({
-      from: process.env.EMAIL_USER,
+      from: `"${senderName}" <${senderEmail}>`,
       to: data.email,
-      subject,
-      html,
+      replyTo: replyTo,
+      subject: subject,
+      text: text, // Plain text version improves deliverability
+      html: html,
+      headers: {
+        'Message-ID': messageId,
+        'X-Mailer': 'Build Wealth Through Property Booking System',
+        'X-Priority': '1',
+        'Importance': 'high',
+        'List-Unsubscribe': `<${websiteUrl}>, <mailto:${replyTo}?subject=Unsubscribe>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        'MIME-Version': '1.0',
+        'Content-Type': 'text/html; charset=UTF-8',
+      },
+      priority: 'high',
+      date: new Date(),
     });
-
-    console.log(`✓ Email sent successfully to ${data.email}`);
     
     // Update email tracking in Firestore if orderRef is provided
     if (orderRef) {
@@ -798,7 +934,52 @@ app.get('/api/verify-session/:sessionId', async (req, res) => {
 });
 
 /**
- * Get Ticket Purchase
+ * Admin Login (Option B - replaces client Firestore access)
+ */
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password required' });
+    }
+    const admin = await loginAdmin(username, password);
+    if (!admin) {
+      return res.status(401).json({ error: 'Invalid username or password' });
+    }
+    const token = createAdminToken(admin);
+    res.json({
+      success: true,
+      admin: { id: admin.id, username: admin.username, email: admin.email, role: admin.role },
+      token,
+      loginTime: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+/**
+ * List All Tickets (admin only)
+ */
+app.get('/api/tickets', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const snapshot = await db.collection('ticket_purchases').get();
+    const orders = snapshot.docs.map((d) => {
+      const data = convertFirestoreData(d.data());
+      return { ...data, order_reference: data.order_reference || d.id };
+    });
+    orders.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    res.json(orders);
+  } catch (error) {
+    console.error('Error listing tickets:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Get Ticket Purchase (public - for payment success page, order_ref is the secret)
  */
 app.get('/api/tickets/:orderReference', async (req, res) => {
   try {
@@ -818,7 +999,7 @@ app.get('/api/tickets/:orderReference', async (req, res) => {
 });
 
 /**
- * Add Ticket Purchase
+ * Add Ticket Purchase (internal use by checkout flow)
  */
 app.post('/api/tickets', async (req, res) => {
   try {
@@ -834,9 +1015,9 @@ app.post('/api/tickets', async (req, res) => {
 });
 
 /**
- * Update Ticket Purchase
+ * Update Ticket Purchase (admin only)
  */
-app.patch('/api/tickets/:orderReference', async (req, res) => {
+app.patch('/api/tickets/:orderReference', requireAdmin, async (req, res) => {
   try {
     const { orderReference } = req.params;
     const updates = req.body;
@@ -853,19 +1034,107 @@ app.patch('/api/tickets/:orderReference', async (req, res) => {
 });
 
 /**
+ * Admin Analytics - Page Views (admin only)
+ */
+app.get('/api/admin/analytics/page-views', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const snapshot = await db.collection('page_views')
+      .orderBy('timestamp', 'desc')
+      .limit(10000)
+      .get();
+    const views = snapshot.docs.map((d) => {
+      const data = d.data();
+      return { id: d.id, ...data, timestamp: data.timestamp?.toDate?.()?.toISOString?.() || data.timestamp };
+    });
+    const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    let filtered = views;
+    if (startDate || endDate) {
+      filtered = views.filter((v) => {
+        const d = v.timestamp ? new Date(v.timestamp) : null;
+        if (!d) return true;
+        if (startDate && d < startDate) return false;
+        if (endDate && d > endDate) return false;
+        return true;
+      });
+    }
+    res.json(filtered);
+  } catch (error) {
+    console.error('Error fetching page views:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Admin Analytics - Visitors (admin only)
+ */
+app.get('/api/admin/analytics/visitors', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const snapshot = await db.collection('visitors').get();
+    const visitors = snapshot.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        ...data,
+        first_seen: data.first_seen?.toDate?.()?.toISOString?.() || data.first_seen,
+        last_visit: data.last_visit?.toDate?.()?.toISOString?.() || data.last_visit,
+      };
+    });
+    res.json(visitors);
+  } catch (error) {
+    console.error('Error fetching visitors:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Admin Analytics - Events (admin only)
+ * Uses Firestore date range query when possible to reduce reads
+ */
+app.get('/api/admin/analytics/events', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const admin = require('firebase-admin');
+    const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const maxLimit = 2000;
+
+    let query = db.collection('analytics_events').orderBy('timestamp', 'desc');
+
+    if (startDate || endDate) {
+      if (startDate) {
+        query = query.where('timestamp', '>=', admin.firestore.Timestamp.fromDate(startDate));
+      }
+      if (endDate) {
+        query = query.where('timestamp', '<=', admin.firestore.Timestamp.fromDate(endDate));
+      }
+    }
+
+    const snapshot = await query.limit(maxLimit).get();
+    const events = snapshot.docs.map((d) => {
+      const data = d.data();
+      return { id: d.id, ...data, timestamp: data.timestamp?.toDate?.()?.toISOString?.() || data.timestamp };
+    });
+    res.json(events);
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Stripe Webhook Handler
  */
 app.post('/api/webhooks/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  console.log('🔔 Stripe webhook received');
-
   let event;
 
   try {
     event = getStripe().webhooks.constructEvent(req.body, sig, endpointSecret);
-    console.log('✓ Webhook signature verified, event type:', event.type);
   } catch (err) {
     console.error('❌ Webhook error:', err);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -878,21 +1147,13 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         const session = event.data.object;
         const productType = session.metadata.productType || 'ticket';
         
-        console.log(`✓ Payment completed for ${productType} order ${session.metadata.orderRef}`);
-        console.log(`Session ID: ${session.id}`);
-        console.log(`Session payment intent: ${session.payment_intent}, Payment status: ${session.payment_status}`);
-        console.log(`Amount total: ${session.amount_total}`);
-        console.log(`Customer email: ${session.customer_email}`);
-        console.log(`Metadata:`, session.metadata);
-        
         // Retrieve the payment intent to get more details
         let paymentIntentId = session.payment_intent;
         try {
           const paymentIntent = await getStripe().paymentIntents.retrieve(session.payment_intent);
           paymentIntentId = paymentIntent.id;
-          console.log(`Payment intent ID: ${paymentIntentId}, status: ${paymentIntent.status}`);
         } catch (piErr) {
-          console.warn('Could not retrieve payment intent details:', piErr.message);
+          // Payment intent retrieval failed, use session payment_intent
         }
         
         // Update Firestore with completed status
@@ -901,8 +1162,6 @@ app.post('/api/webhooks/stripe', async (req, res) => {
           stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
-
-        console.log(`✓ Firestore updated for order ${session.metadata.orderRef}`);
 
         // Send confirmation email based on product type
         try {
@@ -925,17 +1184,14 @@ app.post('/api/webhooks/stripe', async (req, res) => {
               quantity: session.metadata.quantity,
             }, 'ticket', session.metadata.orderRef);
           }
-          console.log(`✓ Confirmation email sent successfully to ${session.customer_email}`);
         } catch (emailError) {
-          console.error(`❌ Failed to send email to ${session.customer_email}:`, emailError.message);
+          console.error(`Failed to send email to ${session.customer_email}:`, emailError.message);
           // Don't throw - we still want to mark payment as completed even if email fails
         }
         break;
 
       case 'checkout.session.expired':
         const expiredSession = event.data.object;
-        
-        console.log(`⚠ Checkout expired for order ${expiredSession.metadata.orderRef}`);
         
         // Update status to failed
         await updateFirestore(expiredSession.metadata.orderRef, {
@@ -946,7 +1202,8 @@ app.post('/api/webhooks/stripe', async (req, res) => {
         break;
 
       default:
-        console.log(`ℹ Unhandled event type ${event.type}`);
+        // Unhandled event type
+        break;
     }
 
     res.json({received: true});
@@ -957,10 +1214,10 @@ app.post('/api/webhooks/stripe', async (req, res) => {
 });
 
 /**
- * Manually Send Confirmation Email
+ * Manually Send Confirmation Email (admin only)
  * Admin endpoint to resend confirmation emails
  */
-app.post('/api/send-email/:orderReference', async (req, res) => {
+app.post('/api/send-email/:orderReference', requireAdmin, async (req, res) => {
   try {
     const { orderReference } = req.params;
     
@@ -1068,7 +1325,6 @@ app.get('/api/debug/test-firestore', async (req, res) => {
   }
   
   try {
-    console.log('Testing Firestore connection...');
     await initializeFirestore();
     
     // Try to read from the collection
@@ -1095,8 +1351,6 @@ app.get('/api/debug/test-firestore', async (req, res) => {
  */
 app.get('/api/firestore-health', async (req, res) => {
   try {
-    console.log('📊 Testing Firestore connection...');
-    
     const checks = {
       hasProjectId: !!process.env.FIREBASE_PROJECT_ID,
       hasServiceAccount: !!process.env.FIREBASE_SERVICE_ACCOUNT,
@@ -1138,8 +1392,7 @@ app.get('/api/firestore-health', async (req, res) => {
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    // Server started
   });
 }
 
