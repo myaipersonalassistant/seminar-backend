@@ -1172,6 +1172,161 @@ app.get('/api/admin/leads', requireAdmin, async (req, res) => {
 });
 
 /**
+ * Send email to leads (admin only)
+ * Body: { emails: string[], subject: string, body: string }
+ */
+app.post('/api/admin/leads/send-email', requireAdmin, async (req, res) => {
+  try {
+    if (!transporter) {
+      return res.status(503).json({ error: 'Email service not configured' });
+    }
+    const { emails = [], subject, body } = req.body || {};
+    const list = Array.isArray(emails) ? emails.filter((e) => e && typeof e === 'string' && e.includes('@')) : [];
+    if (list.length === 0 || !subject) {
+      return res.status(400).json({ error: 'Provide emails array and subject' });
+    }
+    const deduped = [...new Set(list.map((e) => e.trim().toLowerCase()))];
+    await initializeFirestore();
+    const admin = require('firebase-admin');
+    const campaignRef = db.collection('email_campaigns').doc();
+    const campaignId = campaignRef.id;
+    const baseUrl = process.env.BASE_URL || process.env.API_URL || (req.protocol && req.get ? `${req.protocol}://${req.get('host')}` : null) || `http://localhost:${process.env.PORT || 3001}`;
+    const senderName = process.env.EMAIL_SENDER_NAME || 'Build Wealth Through Property';
+    const senderEmail = process.env.EMAIL_USER;
+
+    const logs = [];
+    let sent = 0;
+    let failed = 0;
+
+    for (const email of deduped) {
+      const logRef = db.collection('email_campaign_logs').doc();
+      const logId = logRef.id;
+      const trackingPixel = `<img src="${baseUrl}/api/track/open/${campaignId}/${logId}" width="1" height="1" alt="" style="display:none" />`;
+      const rawHtml = (body || '').trim();
+      const htmlBody = rawHtml.includes('</body>')
+        ? rawHtml.replace('</body>', `${trackingPixel}</body>`)
+        : `${rawHtml || '<p></p>'}${trackingPixel}`;
+      try {
+        await transporter.sendMail({
+          from: `"${senderName}" <${senderEmail}>`,
+          to: email,
+          subject: subject.trim(),
+          html: htmlBody,
+          text: (body || '').replace(/<[^>]+>/g, ''),
+        });
+        await logRef.set({
+          campaign_id: campaignId,
+          email,
+          status: 'sent',
+          sent_at: admin.firestore.Timestamp.now(),
+        });
+        logs.push({ email, status: 'sent' });
+        sent++;
+      } catch (err) {
+        console.error(`Lead email failed to ${email}:`, err.message);
+        await logRef.set({
+          campaign_id: campaignId,
+          email,
+          status: 'failed',
+          error: err.message,
+          sent_at: admin.firestore.Timestamp.now(),
+        });
+        logs.push({ email, status: 'failed' });
+        failed++;
+      }
+    }
+
+    await campaignRef.set({
+      subject: subject.trim(),
+      recipient_count: deduped.length,
+      sent_count: sent,
+      failed_count: failed,
+      sent_at: admin.firestore.Timestamp.now(),
+      admin_id: req.admin?.adminId,
+    });
+
+    res.json({
+      success: true,
+      campaignId,
+      sent,
+      failed,
+      total: deduped.length,
+    });
+  } catch (error) {
+    console.error('Error sending lead emails:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * List email campaigns with metrics (admin only)
+ */
+app.get('/api/admin/leads/campaigns', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const snapshot = await db.collection('email_campaigns')
+      .orderBy('sent_at', 'desc')
+      .limit(100)
+      .get();
+    const campaigns = await Promise.all(
+      snapshot.docs.map(async (d) => {
+        const data = d.data();
+        const logsSnap = await db.collection('email_campaign_logs')
+          .where('campaign_id', '==', d.id)
+          .get();
+        const logs = logsSnap.docs.map((doc) => doc.data());
+        const sentCount = logs.filter((l) => l.status === 'sent').length;
+        const openedCount = logs.filter((l) => l.opened_at).length;
+        const bouncedCount = logs.filter((l) => l.status === 'bounced').length;
+        const openRate = sentCount > 0 ? ((openedCount / sentCount) * 100).toFixed(1) : '0';
+        const bounceRate = sentCount > 0 ? ((bouncedCount / sentCount) * 100).toFixed(1) : '0';
+        return {
+          id: d.id,
+          subject: data.subject,
+          recipient_count: data.recipient_count,
+          sent_count: sentCount,
+          opened_count: openedCount,
+          bounced_count: bouncedCount,
+          open_rate: openRate,
+          bounce_rate: bounceRate,
+          sent_at: data.sent_at?.toDate?.()?.toISOString?.() || data.sent_at,
+        };
+      })
+    );
+    res.json(campaigns);
+  } catch (error) {
+    console.error('Error fetching campaigns:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Email open tracking pixel (public - no auth)
+ * Serves 1x1 gif and logs open event
+ */
+const TRACKING_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+
+app.get('/api/track/open/:campaignId/:logId', async (req, res) => {
+  try {
+    const { campaignId, logId } = req.params;
+    await initializeFirestore();
+    const logRef = db.collection('email_campaign_logs').doc(logId);
+    const logSnap = await logRef.get();
+    if (logSnap.exists && logSnap.data().campaign_id === campaignId && !logSnap.data().opened_at) {
+      await logRef.update({
+        opened_at: require('firebase-admin').firestore.Timestamp.now(),
+      });
+    }
+    res.set('Content-Type', 'image/gif');
+    res.set('Cache-Control', 'no-store');
+    res.send(TRACKING_GIF);
+  } catch {
+    res.set('Content-Type', 'image/gif');
+    res.send(TRACKING_GIF);
+  }
+});
+
+/**
  * Admin Analytics - Events (admin only)
  * Uses Firestore date range query when possible to reduce reads
  */
