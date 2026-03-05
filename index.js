@@ -1102,25 +1102,68 @@ app.get('/api/admin/analytics/visitors', requireAdmin, async (req, res) => {
 });
 
 /**
- * Admin - Reasons Unlock Leads (admin only)
- * Fetches Name + Email from users who unlocked the 4 extra reasons
+ * Admin - Merged Leads (admin only)
+ * Combines leads from: reasons_unlock_leads + ticket_purchases (orders)
+ * Dedupes by email (lowercase). Sources: reasons_unlock, order
  */
 app.get('/api/admin/leads', requireAdmin, async (req, res) => {
   try {
     await initializeFirestore();
-    const snapshot = await db.collection('reasons_unlock_leads')
-      .orderBy('created_at', 'desc')
-      .get();
-    const leads = snapshot.docs.map((d) => {
+    const byEmail = new Map(); // email (lowercase) -> { id, name, email, sources, firstSeen, lastActivity }
+
+    // 1. Reasons unlock leads
+    const unlockSnap = await db.collection('reasons_unlock_leads').get();
+    unlockSnap.docs.forEach((d) => {
       const data = d.data();
-      return {
-        id: d.id,
-        name: data.name || '',
-        email: data.email || '',
-        created_at: data.created_at?.toDate?.()?.toISOString?.() || data.created_at,
-        source: data.source || 'reasons_unlock',
-      };
+      const email = (data.email || '').trim().toLowerCase();
+      if (!email) return;
+      const created = data.created_at?.toDate?.()?.toISOString?.() || new Date().toISOString();
+      const existing = byEmail.get(email);
+      if (!existing) {
+        byEmail.set(email, {
+          id: `unlock-${d.id}`,
+          name: (data.name || '').trim() || email,
+          email: data.email?.trim() || email,
+          sources: ['reasons_unlock'],
+          firstSeen: created,
+          lastActivity: created,
+        });
+      } else {
+        existing.sources = [...new Set([...existing.sources, 'reasons_unlock'])];
+        if (created < existing.firstSeen) existing.firstSeen = created;
+        if (created > existing.lastActivity) existing.lastActivity = created;
+      }
     });
+
+    // 2. Ticket purchases (orders) - customer_name + customer_email
+    const ordersSnap = await db.collection('ticket_purchases').get();
+    ordersSnap.docs.forEach((d) => {
+      const data = d.data();
+      const email = (data.customer_email || '').trim().toLowerCase();
+      if (!email) return;
+      const created = data.created_at?.toDate?.()?.toISOString?.() || data.created_at || new Date().toISOString();
+      const existing = byEmail.get(email);
+      const name = (data.customer_name || '').trim() || email;
+      if (!existing) {
+        byEmail.set(email, {
+          id: `order-${d.id}`,
+          name,
+          email: data.customer_email?.trim() || email,
+          sources: ['order'],
+          firstSeen: created,
+          lastActivity: created,
+        });
+      } else {
+        existing.sources = [...new Set([...existing.sources, 'order'])];
+        if (name && name !== email) existing.name = name; // prefer order name (verified)
+        if (created < existing.firstSeen) existing.firstSeen = created;
+        if (created > existing.lastActivity) existing.lastActivity = created;
+      }
+    });
+
+    const leads = Array.from(byEmail.values())
+      .sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity))
+      .map((l, i) => ({ ...l, id: l.id || `lead-${i}` }));
     res.json(leads);
   } catch (error) {
     console.error('Error fetching leads:', error);
