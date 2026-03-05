@@ -31,10 +31,11 @@ function getStripe() {
 
 const app = express();
 
-// Middleware
+// Middleware - CORS with Authorization header for admin API
 app.use(cors({
-  // In development allow any origin (reflect request origin). In production set FRONTEND_URL.
   origin: process.env.FRONTEND_URL || true,
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 
 // Raw body for webhook signature verification MUST be registered before express.json()
@@ -246,6 +247,17 @@ function hashPassword(password) {
   return crypto.createHash('sha256').update(password).digest('hex').toLowerCase();
 }
 
+function toBase64Url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function fromBase64Url(str) {
+  let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4;
+  if (pad) b64 += '='.repeat(4 - pad);
+  return Buffer.from(b64, 'base64');
+}
+
 function createAdminToken(admin) {
   const secret = process.env.ADMIN_SECRET || process.env.STRIPE_SECRET_KEY || 'dev-secret-change-in-production';
   const payload = {
@@ -253,21 +265,21 @@ function createAdminToken(admin) {
     username: admin.username,
     exp: Date.now() + TOKEN_EXPIRY_HOURS * 60 * 60 * 1000,
   };
-  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+  const payloadB64 = toBase64Url(Buffer.from(JSON.stringify(payload), 'utf8'));
+  const sig = toBase64Url(crypto.createHmac('sha256', secret).update(payloadB64).digest());
   return `${payloadB64}.${sig}`;
 }
 
 function verifyAdminToken(token) {
-  if (!token) return null;
+  if (!token || typeof token !== 'string') return null;
   const secret = process.env.ADMIN_SECRET || process.env.STRIPE_SECRET_KEY || 'dev-secret-change-in-production';
-  const parts = token.split('.');
+  const parts = token.trim().split('.');
   if (parts.length !== 2) return null;
   try {
     const [payloadB64, sig] = parts;
-    const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+    const expectedSig = toBase64Url(crypto.createHmac('sha256', secret).update(payloadB64).digest());
     if (sig !== expectedSig) return null;
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+    const payload = JSON.parse(fromBase64Url(payloadB64).toString('utf8'));
     if (payload.exp && payload.exp < Date.now()) return null;
     return payload;
   } catch {
@@ -1085,6 +1097,33 @@ app.get('/api/admin/analytics/visitors', requireAdmin, async (req, res) => {
     res.json(visitors);
   } catch (error) {
     console.error('Error fetching visitors:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Admin - Reasons Unlock Leads (admin only)
+ * Fetches Name + Email from users who unlocked the 4 extra reasons
+ */
+app.get('/api/admin/leads', requireAdmin, async (req, res) => {
+  try {
+    await initializeFirestore();
+    const snapshot = await db.collection('reasons_unlock_leads')
+      .orderBy('created_at', 'desc')
+      .get();
+    const leads = snapshot.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        name: data.name || '',
+        email: data.email || '',
+        created_at: data.created_at?.toDate?.()?.toISOString?.() || data.created_at,
+        source: data.source || 'reasons_unlock',
+      };
+    });
+    res.json(leads);
+  } catch (error) {
+    console.error('Error fetching leads:', error);
     res.status(500).json({ error: error.message });
   }
 });
