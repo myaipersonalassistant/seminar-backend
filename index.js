@@ -318,6 +318,41 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+/**
+ * Delete other pending orders for the same email (prevents double appearance and unnecessary reminder emails).
+ * Call after a successful payment to clean up duplicate pending sessions.
+ */
+async function deleteOtherPendingOrdersForEmail(customerEmail, excludeOrderRef) {
+  try {
+    await initializeFirestore();
+    const email = (customerEmail || '').trim().toLowerCase();
+    if (!email || !excludeOrderRef) return;
+
+    const snapshot = await db.collection('ticket_purchases')
+      .where('customer_email', '==', email)
+      .where('status', '==', 'pending')
+      .get();
+
+    const batch = db.batch();
+    let deleted = 0;
+    snapshot.docs.forEach((doc) => {
+      const data = doc.data();
+      const orderRef = data.order_reference || doc.id;
+      if (orderRef !== excludeOrderRef) {
+        batch.delete(doc.ref);
+        deleted++;
+      }
+    });
+    if (deleted > 0) {
+      await batch.commit();
+      console.log(`Cleaned up ${deleted} duplicate pending order(s) for ${email}`);
+    }
+  } catch (err) {
+    console.error('Error deleting duplicate pending orders:', err.message);
+    // Non-fatal: payment is still completed
+  }
+}
+
 async function getFromFirestore(orderRef) {
   try {
     await initializeFirestore();
@@ -1399,6 +1434,9 @@ app.post('/api/webhooks/stripe', async (req, res) => {
           stripe_payment_intent_id: paymentIntentId || session.payment_intent || '',
           updated_at: new Date().toISOString(),
         });
+
+        // Delete other pending orders for same email (prevents double appearance and unnecessary reminder emails)
+        await deleteOtherPendingOrdersForEmail(session.customer_email, session.metadata.orderRef);
 
         // Send confirmation email based on product type
         try {
