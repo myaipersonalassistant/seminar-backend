@@ -1138,8 +1138,8 @@ app.get('/api/admin/analytics/visitors', requireAdmin, async (req, res) => {
 
 /**
  * Admin - Merged Leads (admin only)
- * Combines leads from: reasons_unlock_leads + ticket_purchases (orders)
- * Dedupes by email (lowercase). Sources: reasons_unlock, order
+ * Combines leads from: reasons_unlock_leads + resource_download_leads + ticket_purchases (orders)
+ * Dedupes by email (lowercase). Sources: reasons_unlock, resource_download, order
  */
 app.get('/api/admin/leads', requireAdmin, async (req, res) => {
   try {
@@ -1170,7 +1170,32 @@ app.get('/api/admin/leads', requireAdmin, async (req, res) => {
       }
     });
 
-    // 2. Ticket purchases (orders) - customer_name + customer_email
+    // 2. Resource download leads (Start page)
+    const resourceSnap = await db.collection('resource_download_leads').get();
+    resourceSnap.docs.forEach((d) => {
+      const data = d.data();
+      const email = (data.email || '').trim().toLowerCase();
+      if (!email) return;
+      const created = data.created_at?.toDate?.()?.toISOString?.() || new Date().toISOString();
+      const existing = byEmail.get(email);
+      const name = (data.name || '').trim() || email;
+      if (!existing) {
+        byEmail.set(email, {
+          id: `resource-${d.id}`,
+          name,
+          email: data.email?.trim() || email,
+          sources: ['resource_download'],
+          firstSeen: created,
+          lastActivity: created,
+        });
+      } else {
+        existing.sources = [...new Set([...existing.sources, 'resource_download'])];
+        if (created < existing.firstSeen) existing.firstSeen = created;
+        if (created > existing.lastActivity) existing.lastActivity = created;
+      }
+    });
+
+    // 3. Ticket purchases (orders) - customer_name + customer_email
     const ordersSnap = await db.collection('ticket_purchases').get();
     ordersSnap.docs.forEach((d) => {
       const data = d.data();
