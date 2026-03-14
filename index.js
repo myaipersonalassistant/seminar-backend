@@ -568,6 +568,80 @@ The Team`;
           The Team</p>
         </div>
       `;
+    } else if (type === 'zoom_ticket') {
+      const zoomUrl = process.env.ZOOM_MEETING_URL || process.env.ZOOM_LINK || '';
+
+      subject = `Zoom Pass Confirmed - Join the Seminar Online (${data.orderRef})`;
+
+      text = `Zoom Pass Confirmed - Join the Seminar Online
+
+Hi ${data.name},
+
+Thank you for booking your Zoom pass! You're all set to join the Build Wealth Through Property seminar online.
+
+Your Booking Details:
+- Order Reference: ${data.orderRef}
+- Number of Passes: ${data.quantity}
+- Event Date: Saturday, 14 March 2026
+- Event Time: 2:00 PM – 5:00 PM (UK time)
+- Join via: Zoom (online)
+
+${zoomUrl ? `Your Zoom Meeting Link:\n${zoomUrl}\n\nPlease save this link. You can also add the event to your calendar.` : 'Your Zoom meeting link will be sent to you 24 hours before the event. Please check your inbox.'}
+
+What to Expect:
+- Full 3-hour property wealth seminar
+- Expert panel discussion
+- Live Q&A session
+- Join from anywhere — no travel required
+
+We look forward to seeing you online!
+
+Best regards,
+The Team`;
+
+      html = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #2d3748; margin-bottom: 20px;">Zoom Pass Confirmed! 🎥</h1>
+
+          <p>Hi ${data.name},</p>
+
+          <p>Thank you for booking your Zoom pass! You're all set to join the Build Wealth Through Property seminar online.</p>
+
+          <div style="background-color: #f7fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="margin-top: 0;">Your Booking Details</h3>
+            <p><strong>Order Reference:</strong> ${data.orderRef}</p>
+            <p><strong>Number of Passes:</strong> ${data.quantity}</p>
+            <p><strong>Event Date:</strong> Saturday, 14 March 2026</p>
+            <p><strong>Event Time:</strong> 2:00 PM – 5:00 PM (UK time)</p>
+            <p><strong>Format:</strong> Zoom (join from anywhere)</p>
+          </div>
+
+          ${zoomUrl
+            ? `<div style="background-color: #ecfdf5; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #10b981;">
+            <h3 style="margin-top: 0; color: #047857;">Your Zoom Meeting Link</h3>
+            <p><a href="${zoomUrl}" style="color: #059669; font-weight: bold; word-break: break-all;">${zoomUrl}</a></p>
+            <p style="color: #047857; font-size: 14px;">Save this link — you'll need it to join on the day.</p>
+          </div>`
+            : `<div style="background-color: #fffbeb; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
+            <p style="margin: 0; color: #92400e;">Your Zoom meeting link will be sent to you 24 hours before the event. Please check your inbox.</p>
+          </div>`}
+
+          <h3>What to Expect</h3>
+          <ul>
+            <li>Full 3-hour property wealth seminar</li>
+            <li>Expert panel discussion</li>
+            <li>Live Q&A session</li>
+            <li>Join from anywhere — no travel required</li>
+          </ul>
+
+          <hr style="margin: 30px 0; border: none; border-top: 1px solid #e2e8f0;">
+
+          <p>We look forward to seeing you online!</p>
+
+          <p>Best regards,<br>
+          The Team</p>
+        </div>
+      `;
     } else {
       subject = `Booking Confirmed - Your Seminar Tickets (${data.orderRef})`;
       
@@ -718,8 +792,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Invalid quantity' });
     }
 
-    if (!productType || !['ticket', 'book'].includes(productType)) {
-      return res.status(400).json({ error: 'Invalid product type. Must be "ticket" or "book"' });
+    if (!productType || !['ticket', 'book', 'zoom_ticket'].includes(productType)) {
+      return res.status(400).json({ error: 'Invalid product type. Must be "ticket", "book", or "zoom_ticket"' });
     }
 
     // Validate shipping info for books
@@ -727,16 +801,24 @@ app.post('/api/create-checkout-session', async (req, res) => {
       return res.status(400).json({ error: 'Shipping address is required for book orders' });
     }
 
-    const orderRef = productType === 'book' 
+    const orderRef = productType === 'book'
       ? `BOOK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      : productType === 'zoom_ticket'
+      ? `ZOOM-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
       : `TIX-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
     // Product configuration
-    const productConfig = productType === 'book' 
+    const productConfig = productType === 'book'
       ? {
           name: 'Build Wealth Through Property — 7 Reasons Why',
           description: '100% of proceeds go to Place of Victory Charity',
           unit_amount: 1999, // £19.99
+        }
+      : productType === 'zoom_ticket'
+      ? {
+          name: 'Seminar Zoom Pass',
+          description: 'Join the seminar online • Saturday, 14 March 2026 • 2:00 PM – 5:00 PM',
+          unit_amount: 1000, // £10.00
         }
       : {
           name: 'Seminar Ticket',
@@ -1476,6 +1558,13 @@ app.post('/api/webhooks/stripe', async (req, res) => {
               quantity: parseInt(session.metadata.quantity),
               amountTotal: session.amount_total,
             }, 'book', session.metadata.orderRef);
+          } else if (productType === 'zoom_ticket') {
+            await sendConfirmationEmail({
+              email: session.customer_email,
+              name: session.metadata.name,
+              orderRef: session.metadata.orderRef,
+              quantity: session.metadata.quantity,
+            }, 'zoom_ticket', session.metadata.orderRef);
           } else {
             await sendConfirmationEmail({
               email: session.customer_email,
