@@ -569,77 +569,111 @@ The Team`;
         </div>
       `;
     } else if (type === 'zoom_ticket') {
-      const zoomUrl = process.env.ZOOM_MEETING_URL || process.env.ZOOM_LINK || '';
+      const zoomUrl = process.env.ZOOM_MEETING_URL || '';
+      const zoomMeetingId = '980 2275 5657';
+      const zoomOneTapUS1 = '+15642172000,,98022755657#';
+      const zoomOneTapUS2 = '+16469313860,,98022755657#';
+      const zoomJoinInstructions = 'https://zoom.us/meetings/98022755657/invitations?signature=QDQx4SAMwOFUgnN7L0DxWX_iio6gL2KQ6t4xcgN57u0';
 
-      subject = `Zoom Pass Confirmed - Join the Seminar Online (${data.orderRef})`;
+      subject = `Your Zoom Pass — Seminar and Book Launch: Build Wealth Through Property (${data.orderRef})`;
 
-      text = `Zoom Pass Confirmed - Join the Seminar Online
+      text = `Seminar and Book Launch: Build Wealth Through Property — Zoom Pass Confirmed
 
 Hi ${data.name},
 
-Thank you for booking your Zoom pass! You're all set to join the Build Wealth Through Property seminar online.
+Thank you for booking your Zoom pass. You're all set to join our seminar and book launch online.
 
-Your Booking Details:
-- Order Reference: ${data.orderRef}
-- Number of Passes: ${data.quantity}
-- Event Date: Saturday, 14 March 2026
-- Event Time: 2:00 PM – 5:00 PM (UK time)
-- Join via: Zoom (online)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVENT DETAILS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-${zoomUrl ? `Your Zoom Meeting Link:\n${zoomUrl}\n\nPlease save this link. You can also add the event to your calendar.` : 'Your Zoom meeting link will be sent to you 24 hours before the event. Please check your inbox.'}
+Topic: Seminar and Book Launch: Build Wealth Through Property
+Date: Saturday, 14 March 2026
+Time: 2:00 PM London (GMT)
+Order Reference: ${data.orderRef}
+Number of Passes: ${data.quantity}
 
-What to Expect:
-- Full 3-hour property wealth seminar
-- Expert panel discussion
-- Live Q&A session
-- Join from anywhere — no travel required
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO JOIN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-We look forward to seeing you online!
+Join Zoom Meeting:
+${zoomUrl || '(Link will be sent separately)'}
+
+Meeting ID: ${zoomMeetingId}
+
+One-tap mobile (US):
+${zoomOneTapUS1}
+${zoomOneTapUS2}
+
+Join from computer or app: ${zoomJoinInstructions}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT TO EXPECT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• Full property wealth seminar
+• Build Wealth Through Property book launch
+• Expert panel discussion
+• Live Q&A session
+• Join from anywhere — laptop, tablet, or phone
+
+Add this to your calendar and save the details above. We look forward to seeing you online!
 
 Best regards,
 The Team`;
 
       html = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h1 style="color: #2d3748; margin-bottom: 20px;">Zoom Pass Confirmed! 🎥</h1>
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #334155;">
+          <h1 style="color: #1e293b; margin-bottom: 8px; font-size: 24px;">Your Zoom Pass is Ready</h1>
+          <p style="color: #64748b; font-size: 16px; margin-top: 0;">Seminar and Book Launch: Build Wealth Through Property</p>
 
           <p>Hi ${data.name},</p>
 
-          <p>Thank you for booking your Zoom pass! You're all set to join the Build Wealth Through Property seminar online.</p>
+          <p>Thank you for booking your Zoom pass. You're all set to join our seminar and book launch online.</p>
 
-          <div style="background-color: #f7fafc; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="margin-top: 0;">Your Booking Details</h3>
-            <p><strong>Order Reference:</strong> ${data.orderRef}</p>
-            <p><strong>Number of Passes:</strong> ${data.quantity}</p>
-            <p><strong>Event Date:</strong> Saturday, 14 March 2026</p>
-            <p><strong>Event Time:</strong> 2:00 PM – 5:00 PM (UK time)</p>
-            <p><strong>Format:</strong> Zoom (join from anywhere)</p>
+          <div style="background-color: #f8fafc; padding: 24px; border-radius: 12px; margin: 24px 0; border: 1px solid #e2e8f0;">
+            <h3 style="margin: 0 0 16px 0; color: #1e293b; font-size: 16px;">Event Details</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr><td style="padding: 6px 0; color: #64748b; font-size: 14px;">Topic</td></tr>
+              <tr><td style="padding: 0 0 12px 0; font-weight: 600; color: #1e293b;">Seminar and Book Launch: Build Wealth Through Property</td></tr>
+              <tr><td style="padding: 6px 0; color: #64748b; font-size: 14px;">Date & Time</td></tr>
+              <tr><td style="padding: 0 0 12px 0; font-weight: 600; color: #1e293b;">Saturday, 14 March 2026 — 2:00 PM London (GMT)</td></tr>
+              <tr><td style="padding: 6px 0; color: #64748b; font-size: 14px;">Order Reference</td></tr>
+              <tr><td style="padding: 0 0 12px 0; font-family: monospace; font-weight: 600; color: #b45309;">${data.orderRef}</td></tr>
+              <tr><td style="padding: 6px 0; color: #64748b; font-size: 14px;">Passes</td></tr>
+              <tr><td style="padding: 0; font-weight: 600; color: #1e293b;">${data.quantity}</td></tr>
+            </table>
           </div>
 
           ${zoomUrl
-            ? `<div style="background-color: #ecfdf5; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #10b981;">
-            <h3 style="margin-top: 0; color: #047857;">Your Zoom Meeting Link</h3>
-            <p><a href="${zoomUrl}" style="color: #059669; font-weight: bold; word-break: break-all;">${zoomUrl}</a></p>
-            <p style="color: #047857; font-size: 14px;">Save this link — you'll need it to join on the day.</p>
+            ? `<div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); padding: 24px; border-radius: 12px; margin: 24px 0; border: 1px solid #f59e0b;">
+            <h3 style="margin: 0 0 12px 0; color: #92400e; font-size: 16px;">Join Zoom Meeting</h3>
+            <p style="margin: 0 0 16px 0;"><a href="${zoomUrl}" style="color: #b45309; font-weight: bold; font-size: 16px; word-break: break-all; text-decoration: none;">${zoomUrl}</a></p>
+            <p style="margin: 0 0 8px 0; color: #78350f; font-size: 14px;"><strong>Meeting ID:</strong> ${zoomMeetingId}</p>
+            <p style="margin: 0; color: #78350f; font-size: 13px;">One-tap mobile (US): ${zoomOneTapUS1} or ${zoomOneTapUS2}</p>
+            <p style="margin: 12px 0 0 0; font-size: 13px;"><a href="${zoomJoinInstructions}" style="color: #b45309;">Full join instructions →</a></p>
           </div>`
             : `<div style="background-color: #fffbeb; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
-            <p style="margin: 0; color: #92400e;">Your Zoom meeting link will be sent to you 24 hours before the event. Please check your inbox.</p>
+            <p style="margin: 0; color: #92400e;">Your Zoom meeting link will be sent to you before the event. Please check your inbox.</p>
           </div>`}
 
-          <h3>What to Expect</h3>
-          <ul>
-            <li>Full 3-hour property wealth seminar</li>
-            <li>Expert panel discussion</li>
-            <li>Live Q&A session</li>
-            <li>Join from anywhere — no travel required</li>
-          </ul>
+          <div style="background-color: #f0fdf4; padding: 20px; border-radius: 8px; margin: 24px 0; border-left: 4px solid #22c55e;">
+            <h3 style="margin: 0 0 12px 0; color: #166534; font-size: 16px;">What to Expect</h3>
+            <ul style="margin: 0; padding-left: 20px; color: #15803d;">
+              <li>Full property wealth seminar</li>
+              <li>Build Wealth Through Property book launch</li>
+              <li>Expert panel discussion</li>
+              <li>Live Q&A session</li>
+              <li>Join from anywhere — laptop, tablet, or phone</li>
+            </ul>
+          </div>
 
-          <hr style="margin: 30px 0; border: none; border-top: 1px solid #e2e8f0;">
+          <p style="color: #64748b; font-size: 14px;">Add this to your calendar and save the details above. We look forward to seeing you online!</p>
 
-          <p>We look forward to seeing you online!</p>
+          <hr style="margin: 32px 0; border: none; border-top: 1px solid #e2e8f0;">
 
-          <p>Best regards,<br>
-          The Team</p>
+          <p style="margin: 0; color: #64748b; font-size: 14px;">Best regards,<br><strong>The Team</strong></p>
         </div>
       `;
     } else {
